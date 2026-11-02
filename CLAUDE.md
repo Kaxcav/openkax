@@ -3,7 +3,7 @@
 Você é o **lead técnico** deste repositório. A fonte de verdade é `PLANO_MESTRE.md` — leia inteiro antes de qualquer ação na primeira sessão e releia a seção da fase atual ao retomar.
 
 ## O que é este projeto
-Gateway/proxy local de IA em Rust (binário único Windows, < 8 MB, RSS < 10 MB) que:
+Gateway/proxy local de IA em Rust (binário único Windows, < 8 MB, memória privada < 10 MB ociosa após uso; working set só informativo) que:
 1. Expõe `/v1/chat/completions` e `/v1/messages` (Anthropic) em `localhost:8000`.
 2. Roteia **classes** (`kax/coder-fast`, `kax/coder-smart`, `kax/summarizer`, `kax/reviewer`, `kax/cheap-long`) para um pool de providers free/baratos com scheduler de quota (RPM/TPM/RPD/TPD) e fallback pré-primeiro-token.
 3. Faz passthrough byte-a-byte de `claude-*` para a Anthropic.
@@ -12,14 +12,14 @@ Gateway/proxy local de IA em Rust (binário único Windows, < 8 MB, RSS < 10 MB)
 Modo B (MCP com pacote enxuto) é o principal. Modo A (rewrite de modelo via `ANTHROPIC_DEFAULT_HAIKU_MODEL`) é bônus.
 
 ## Fase atual
-**Fase 0 — Core do gateway.** Critério de saída: 4 testes de fallback com `wiremock` passando (429→próximo; timeout 1º token→próximo; erro pós-1º-token→encerra limpo; TPM insuficiente→provider pulado sem request), Continue/Cline funcionando via classes, binário < 8 MB.
+**Fase 0 — Core do gateway.** Critério de saída: 4 testes de fallback com `wiremock` passando (429→próximo; timeout 1º token→próximo; erro pós-1º-token→encerra limpo; TPM insuficiente→provider pulado sem request), Continue/Cline funcionando via classes, binário < 8 MB, memória privada < 10 MB ociosa após uso.
 Não iniciar Fase 1 antes disso. Atualize esta seção ao mudar de fase.
-Progresso (2026-11-02): scheduler/dispatcher/ledger + providers de cauda (ADR 0003/0004); cooldown por tipo de erro (F0-17); timeout de 1º token por modelo (F0-18); Cohere sem raciocínio + `ascii_json` (F0-19); rotas F0-20; Groq/Cloudflare habilitados, 410 e headers IETF (F0-21); hot-reload + snapshot dos buckets (F0-10, ADR 0005); WindowsPlatform + CI ubuntu/windows com artefato `.exe` (F0-11). Testes: 94 unitários + 19 de integração (Windows e Linux). Release Windows local 2,94 MiB, working set ocioso 8,29 MiB. Falta: aceite com Continue/Cline (F0-12, usuário) e a decisão F0-22 (cartão na Vercel; remover o GitHub Models aposentado). Ver `tasks.json`.
+Progresso (2026-11-02): scheduler/dispatcher/ledger + providers de cauda (ADR 0003/0004); cooldown por tipo de erro (F0-17); timeout de 1º token por modelo (F0-18); Cohere sem raciocínio + `ascii_json` (F0-19); rotas F0-20; Groq/Cloudflare habilitados, 410 e headers IETF (F0-21); hot-reload + snapshot dos buckets (F0-10, ADR 0005); WindowsPlatform + CI ubuntu/windows com artefato `.exe` (F0-11); GitHub Models removido e Vercel desligada/fora das rotas (F0-22); critério de memória privada + pool/blocking enxutos (F0-23, ADR 0002). Testes: 94 unitários + 19 de integração (Windows e Linux). Release Windows local 2,94 MiB; memória privada ociosa após 5 requests 3,82 MiB (working set 14,7 MiB, informativo). PR `fase-0 → main` aberto, **sem merge** até o aceite com Continue/Cline (F0-12, usuário). Ver `tasks.json`.
 
 ## Ambientes (ver ADR 0001)
 Dois ambientes de dev; descubra em qual está (`uname`/plataforma) antes de propor comandos.
 - **Notebook (WSL2 Ubuntu)**: repo em `~/openkax` (ext4). Comandos **bash em Linux**, nunca PowerShell. Tem WDAC em modo enforce: **nenhum `.exe` não assinado roda no host**; rode o binário Linux dentro do WSL (`127.0.0.1:8000`) — clientes no Windows alcançam via `localhost:8000`.
-- **PC de casa (`kaxcavmaster`, Windows nativo)**: sem WDAC, sem VPN, repo em `D:\dev\openkax`. PowerShell e Git Bash permitidos; `cargo test`/`clippy` rodam no Windows e o `.exe` roda localmente (medir tamanho/RSS, smoke). Rede sem proxy: é daqui que se conferem Groq/GitHub.
+- **PC de casa (`kaxcavmaster`, Windows nativo)**: sem WDAC, sem VPN, repo em `D:\dev\openkax`. PowerShell e Git Bash permitidos; `cargo test`/`clippy` rodam no Windows e o `.exe` roda localmente (medir tamanho/memória privada, smoke). Rede sem proxy: é daqui que se confere a Groq.
 - O `.exe` de **release** vem do GitHub Actions (`windows-latest`); o build local é só para medir e testar. Código é cross-platform; integração com SO (tray, autostart, paths) isolada atrás do trait `Platform` (`UnixPlatform` XDG, `WindowsPlatform` `%LOCALAPPDATA%\OpenKax`).
 - Validação de chaves: `./doctor.sh` (Linux) ou `.\doctor.ps1` (Windows sem WDAC).
 

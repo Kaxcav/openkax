@@ -71,10 +71,10 @@
     },
     {
       "id": "F0-12",
-      "title": "Aceite manual: Continue/Cline em kax/coder-fast e kax/coder-smart; RSS ocioso",
+      "title": "Aceite manual: Continue/Cline em kax/coder-fast e kax/coder-smart; memória privada ociosa",
       "owner": "user",
       "status": "todo",
-      "note": "RSS: WS ocioso pós-uso no Windows (15,2 MiB) passa do alvo de 10 MB; private bytes 4,4 MiB. Medir também no Linux/WSL no aceite"
+      "note": "Critério de memória agora é memória privada < 10 MB ociosa após uso (F0-23): 3,82 MiB no Windows, 5 min depois de 5 requests. Medir também no Linux/WSL no aceite. PR fase-0 → main aberto; merge só depois deste aceite"
     },
     {
       "id": "F0-13",
@@ -137,7 +137,15 @@
       "id": "F0-22",
       "title": "Decidir: cadastrar cartão no Vercel AI Gateway (403 'requires a valid credit card on file' até em modelo grátis) ou tirar a Vercel das rotas; e remover o GitHub (aposentado) do providers.toml/rota",
       "owner": "user",
-      "status": "todo"
+      "status": "done",
+      "note": "Decidido pelo usuário: GitHub Models removido (TOML, rota, .env.example, doctors, PLANO §1.2); Vercel sem cartão → enabled = false e fora de todas as rotas. ADR 0004"
+    },
+    {
+      "id": "F0-23",
+      "title": "Critério de memória privada < 10 MB ociosa após uso (working set informativo) + higiene de pool do reqwest e blocking do tokio, medida antes/depois",
+      "owner": "lead",
+      "status": "done",
+      "note": "ADR 0002. Privada/WS em MiB, antes → depois: start 1,77/7,99 → 1,77/8,01; pós-5-req 4,07/14,80 → 4,07/14,78; +5 min 3,86/14,82 → 3,82/14,74. Diferença no ruído para requests sequenciais; .exe 3.086.848 B"
     }
   ]
 }
