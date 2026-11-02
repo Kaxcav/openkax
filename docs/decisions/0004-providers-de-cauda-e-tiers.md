@@ -102,6 +102,16 @@ Decisões do usuário sobre o que a F0-21 deixou em aberto:
 - **Vercel sem cartão.** O provider fica no TOML com `enabled = false` e o comentário "exige cartão de crédito cadastrado (403), mesmo para modelo grátis", e sai de todas as rotas (`coder-fast`, `coder-smart`, `summarizer`). Com isso nenhuma rota tem degrau `credit`; o tier e a validação de ordem continuam valendo para quando houver. Religar = cadastrar cartão, `enabled = true` e devolver os degraus às rotas.
 - O teste `repo_providers_toml_content` fixa as duas coisas: `github` ausente e nenhum degrau `vercel` em rota.
 
+### F0-24 (2026-11-02) — aceite da Fase 0 sem cliente real
+
+Decisão do Kaxcav: o aceite manual com Continue/Cline (F0-12) deixa de bloquear a Fase 0 e vira conferência opcional. O critério passa a ser `tests/client_compat.rs` verde no CI (Linux e Windows), com wiremock.
+
+- O gateway segue o contrato OpenAI para `usage`: só sai se o cliente pediu (`stream_options.include_usage`), uma vez, num chunk de `choices` vazio logo antes de `[DONE]`, venha como vier do upstream. Motivo: há upstream que manda `usage` em todo chunk (Gemini) e o Continue perde texto e tool_calls nesse caso (continuedev/continue#13417).
+- `content: null` e `content` ausente chegam ao upstream como o cliente mandou.
+- Índices de `tool_calls` saem estáveis e sequenciais: há upstream que omite ou repete `index` em chamadas paralelas, e `id` novo marca chamada nova. Sem isso, a agregação sem streaming fundia as chamadas.
+- Erro do upstream depois do `finish_reason` encerra normalmente: a resposta está completa, então não há 2º final nem cooldown.
+- A suíte não prova tudo: o turno na nuvem não conseguiu abrir o `openai.ts` dos dois clientes, então parte dos formatos veio de PRs, issues, docs e memória do código. O cabeçalho do teste separa o que tem fonte do que não tem, e `docs/smoke/fase-0-clientes.md` traz o roteiro com os clientes reais. Tool-calling real por provider só o smoke mede.
+
 ## Consequências
 
 - `providers.toml` antigo com `paid = true` não parseia mais (`deny_unknown_fields`): use `tier = "paid"`.

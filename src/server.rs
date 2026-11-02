@@ -10,6 +10,11 @@
 //! - Erro de culpa da request (400/413/422): no máximo 1 candidato extra; dois
 //!   seguidos → status do upstream devolvido ao cliente (ADR 0003, A3).
 //! - Deltas de raciocínio nunca chegam ao cliente (ADR 0004, N4).
+//! - `usage` só sai se o cliente pediu (`stream_options.include_usage`), uma vez,
+//!   num chunk de `choices` vazio logo antes de `[DONE]`, seja qual for o formato
+//!   do upstream (F0-24).
+//! - Índices de `tool_calls` chegam ao cliente estáveis e sequenciais, mesmo com
+//!   upstream que omite ou repete `index` em chamadas paralelas (F0-24).
 //! - `x-openkax-exclude-family: glm,qwen` tira famílias da rota (N5).
 //! - `x-openkax-max-tier: free` tira degraus credit/paid da rota.
 //! - `x-openkax-pin: provider/modelo` (depuração) fixa o candidato; continua
@@ -705,6 +710,45 @@ fn output_chars(chunk: &ChatCompletionChunk) -> usize {
         .sum()
 }
 
+/// Dá a cada chamada paralela o seu índice. Há upstream que omite `index` ou
+/// repete o mesmo em chamadas diferentes; o `id` novo é o que marca a chamada.
+#[derive(Default)]
+struct ToolIndexer {
+    /// `(index do upstream, id)` por índice devolvido ao cliente.
+    slots: Vec<(Option<u64>, String)>,
+}
+
+impl ToolIndexer {
+    fn normalize(&mut self, delta: &mut Value) {
+        let up = delta["index"].as_u64();
+        let id = delta["id"].as_str().unwrap_or("").to_owned();
+        let by_index = up.and_then(|u| self.slots.iter().rposition(|s| s.0 == Some(u)));
+        let found = if id.is_empty() {
+            // Continuação: a chamada daquele índice ou, sem índice, a última.
+            if up.is_some() {
+                by_index
+            } else {
+                self.slots.len().checked_sub(1)
+            }
+        } else {
+            self.slots
+                .iter()
+                .position(|s| s.1 == id)
+                .or(by_index.filter(|&i| self.slots[i].1.is_empty()))
+        };
+        let slot = found.unwrap_or_else(|| {
+            self.slots.push((up, String::new()));
+            self.slots.len() - 1
+        });
+        if !id.is_empty() {
+            self.slots[slot].1 = id;
+        }
+        if let Some(o) = delta.as_object_mut() {
+            o.insert("index".into(), slot.into());
+        }
+    }
+}
+
 /// Repassa prelúdio + resto do upstream ao cliente; dono da `Reservation`.
 /// Dropado antes do fim (cliente desconectou) → `Reservation::drop` cobra o
 /// estimado sem cooldown e o ledger registra `client_disconnected`.
@@ -718,6 +762,7 @@ struct Relay {
     usage: Option<Usage>,
     ttft: Duration,
     forward_usage: bool,
+    tools: ToolIndexer,
     last: (String, u64, String),
     finished: bool,
 }
@@ -732,13 +777,37 @@ impl Relay {
         if let Some(r) = &mut self.res {
             r.add_output_chars(output_chars(chunk) + reasoning);
         }
-        if chunk.usage.is_some() {
-            self.usage = chunk.usage;
+        for c in chunk.choices.iter_mut().filter(|c| c.index == 0) {
+            for t in c.delta.tool_calls.iter_mut().flatten() {
+                self.tools.normalize(t);
+            }
+        }
+        // O último vale; quem repassa é `usage_chunk`, no fim (F0-24): há upstream
+        // que manda `usage` em todo chunk, e há cliente que trata isso como o fim.
+        if let Some(u) = chunk.usage.take() {
+            self.usage = Some(u);
         }
         if !chunk.id.is_empty() {
             self.last = (chunk.id.clone(), chunk.created, chunk.model.clone());
         }
-        !provider::is_empty_chunk(chunk) && (!chunk.choices.is_empty() || self.forward_usage)
+        !provider::is_empty_chunk(chunk)
+    }
+
+    /// Chunk final com `usage`, se o cliente pediu e o upstream informou.
+    fn usage_chunk(&self) -> Option<ChatCompletionChunk> {
+        if !self.forward_usage {
+            return None;
+        }
+        let (id, created, model) = self.last.clone();
+        Some(ChatCompletionChunk {
+            id,
+            object: "chat.completion.chunk".into(),
+            created,
+            model,
+            choices: Vec::new(),
+            usage: Some(self.usage?),
+            extra: Default::default(),
+        })
     }
 
     fn finish_ok(&mut self) {
@@ -783,6 +852,9 @@ impl Relay {
             extra: Default::default(),
         };
         let mut out = sse_bytes(&chunk).to_vec();
+        if let Some(u) = self.usage_chunk() {
+            out.extend_from_slice(&sse_bytes(&u));
+        }
         out.extend_from_slice(DONE.as_bytes());
         Bytes::from(out)
     }
@@ -806,7 +878,11 @@ impl Relay {
                 }
                 None => {
                     self.finish_ok();
-                    return Some(Bytes::from_static(DONE.as_bytes()));
+                    let mut out = self
+                        .usage_chunk()
+                        .map_or_else(Vec::new, |c| sse_bytes(&c).to_vec());
+                    out.extend_from_slice(DONE.as_bytes());
+                    return Some(Bytes::from(out));
                 }
                 Some(Err(e)) => return Some(self.finish_err(&e)),
             }
@@ -848,6 +924,7 @@ fn new_relay(
         usage: None,
         ttft,
         forward_usage,
+        tools: ToolIndexer::default(),
         last: Default::default(),
         finished: false,
     }
@@ -897,7 +974,7 @@ async fn aggregate_response(
     stream: StartedStream,
     ttft: Duration,
 ) -> Response {
-    let mut relay = new_relay(st.clone(), meta, cand.clone(), res, stream, ttft, true);
+    let mut relay = new_relay(st.clone(), meta, cand.clone(), res, stream, ttft, false);
     let mut content = String::new();
     let mut tool_calls: BTreeMap<u64, Value> = BTreeMap::new();
     let mut finish_reason: Option<String> = None;
@@ -985,6 +1062,61 @@ fn merge_tool_call(acc: &mut BTreeMap<u64, Value>, delta: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn indexes(deltas: &[Value]) -> Vec<Value> {
+        let mut ix = ToolIndexer::default();
+        deltas
+            .iter()
+            .map(|d| {
+                let mut d = d.clone();
+                ix.normalize(&mut d);
+                d["index"].clone()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tool_indexer_keeps_well_formed_interleaved_indexes() {
+        let d = [
+            json!({ "index": 0, "id": "c1" }),
+            json!({ "index": 1, "id": "c2" }),
+            json!({ "index": 0 }),
+            json!({ "index": 1 }),
+        ];
+        assert_eq!(indexes(&d), [json!(0), json!(1), json!(0), json!(1)]);
+    }
+
+    #[test]
+    fn tool_indexer_splits_parallel_calls_with_repeated_or_missing_index() {
+        let repeated = [
+            json!({ "index": 0, "id": "c1" }),
+            json!({ "index": 0 }),
+            json!({ "index": 0, "id": "c2" }),
+            json!({ "index": 0 }),
+        ];
+        assert_eq!(indexes(&repeated), [json!(0), json!(0), json!(1), json!(1)]);
+        let missing = [
+            json!({ "id": "c1" }),
+            json!({ "function": { "arguments": "{}" } }),
+            json!({ "id": "c2" }),
+        ];
+        assert_eq!(indexes(&missing), [json!(0), json!(0), json!(1)]);
+    }
+
+    #[test]
+    fn tool_indexer_tolerates_repeated_id_and_late_id() {
+        let repeated_id = [
+            json!({ "index": 0, "id": "c1" }),
+            json!({ "index": 0, "id": "c1" }),
+        ];
+        assert_eq!(indexes(&repeated_id), [json!(0), json!(0)]);
+        let late_id = [
+            json!({ "index": 0, "function": { "name": "f" } }),
+            json!({ "index": 0, "id": "c1" }),
+            json!({ "index": 1, "id": "" }),
+        ];
+        assert_eq!(indexes(&late_id), [json!(0), json!(0), json!(1)]);
+    }
 
     #[test]
     fn tool_call_deltas_merge_by_index() {

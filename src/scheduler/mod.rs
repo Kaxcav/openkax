@@ -1556,7 +1556,7 @@ fn request_text(request: &ChatCompletionRequest) -> (usize, usize) {
                         .map_or(NON_TEXT_PART_CHARS, |t| t.chars().count());
                 }
             }
-            None => {}
+            Some(MessageContent::Null) | None => {}
         }
         if let Some(tc) = m.extra.get("tool_calls") {
             chars += json_len(tc);

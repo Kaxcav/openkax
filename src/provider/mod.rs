@@ -375,6 +375,9 @@ impl SseEvents {
                         finished |= has_finish(&c);
                         Some((Ok(c), (ev, finished, false)))
                     }
+                    // Depois do `finish_reason` a resposta já está completa: erro
+                    // aqui não é morte no meio (nem gera um 2º final ao cliente).
+                    Some(Err(_)) if finished => None,
                     Some(Err(e)) => Some((Err(UpstreamError::MidStream(e)), (ev, finished, true))),
                 }
             },
@@ -687,6 +690,9 @@ pub fn build_upstream_body(
         let so = obj
             .entry("stream_options")
             .or_insert_with(|| Value::Object(Default::default()));
+        if !so.is_object() {
+            *so = Value::Object(Default::default());
+        }
         if let Some(so) = so.as_object_mut() {
             so.insert("include_usage".into(), true.into());
         }

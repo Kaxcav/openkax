@@ -230,6 +230,14 @@ fn upstream_body_auto_only_drops_tools_for_none() {
 }
 
 #[test]
+fn upstream_body_replaces_null_stream_options() {
+    let p = provider_from("");
+    let req = request(json!({ "stream_options": null }));
+    let b = build_upstream_body(&p, &req, "m", None);
+    assert_eq!(b["stream_options"]["include_usage"], true);
+}
+
+#[test]
 fn upstream_body_without_stream_usage_quirk() {
     let p = provider_from("quirks = { no_stream_usage = true }");
     let req = request(json!({ "stream_options": { "include_usage": true }, "max_tokens": 10 }));
