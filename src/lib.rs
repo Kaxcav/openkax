@@ -20,3 +20,4 @@ pub mod scheduler;
 pub mod server;
 pub mod translate;
 pub mod verify;
+pub mod worktree;
