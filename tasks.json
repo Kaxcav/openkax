@@ -197,30 +197,31 @@
       "id": "F1-5",
       "title": "POST /v1/messages/count_tokens",
       "owner": "lead",
-      "status": "todo",
+      "status": "review",
       "depends": [
         "F1-1"
       ],
-      "note": "Precisa de um acessor no scheduler para o chars_per_token do 1º degrau da classe, sem passar por pick: não depende de cota nem de limite de pacote."
+      "note": "Implementado com class_chars_per_token no Scheduler; estimativa sem reserva de cota nem limite de pacote. 3 testes de aceite verdes."
     },
     {
       "id": "F1-6",
       "title": "Passthrough byte a byte claude-* → anthropic, ledger só metadados",
       "owner": "lead",
-      "status": "todo",
+      "status": "review",
       "depends": [
         "F1-1"
       ],
-      "note": "Campo opcional `status` em RequestRecord. Não-2xx não pode sair como outcome ok; se usar variante nova de Outcome, avisar no LOG, porque o report da fábrica (F5-2) lê o ledger."
+      "note": "Proxy byte a byte com leitura mínima de model; repasse de headers sem hop-by-hop; stream ao vivo via Body::from_stream; ledger com campo opcional status e outcome RequestFault em não-2xx. 7 testes de aceite verdes."
     },
     {
       "id": "F1-7",
       "title": "Aliases Modo A: seção opcional [aliases] no TOML",
       "owner": "lead",
-      "status": "todo",
+      "status": "review",
       "depends": [
         "F1-4"
-      ]
+      ],
+      "note": "Tabela opcional [aliases] no TOML com casamento glob (*); validação de classe de destino existente; resolução antes do roteamento em /v1/messages e /v1/messages/count_tokens. 3 testes de aceite verdes."
     },
     {
       "id": "F1-8",
