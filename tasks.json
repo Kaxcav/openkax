@@ -209,6 +209,13 @@
       "owner": "lead",
       "status": "done",
       "note": "src/report.rs + despacho em main.rs; tool MCP report passa a usar o módulo (src/mcp/report.rs removido; JSON agora tasks_by_class/tasks_by_provider/requests_by_*). 4 testes unitários novos (percentis, agregação com linhas malformadas, período vazio/dir ausente, --since) substituem os 2 de mcp/report; mcp_contract ajustado. 132 unitários + demais suítes verdes. Não rodado contra ledger real longo"
+    },
+    {
+      "id": "F2-8",
+      "title": "Revisão PR #3, C1 (crítico): verify e git sem as chaves de API no ambiente",
+      "owner": "lead",
+      "status": "review",
+      "note": "verify::clean_env: env_clear + allowlist fixa (PATH, HOME, USERPROFILE, CARGO_HOME, RUSTUP_*, TEMP/TMP/TMPDIR, SystemRoot/SystemDrive/windir/ComSpec/PATHEXT, LANG/LC_ALL, APPDATA/LOCALAPPDATA/PROGRAMDATA, NUMBER_OF_PROCESSORS, PROCESSOR_ARCHITECTURE, RUST_BACKTRACE, GIT_EXEC_PATH) nos comandos de verify, no git apply e no git() do worktree.rs (hooks/config do worktree passam por código do operário). env_passthrough opcional no .kax/verify.toml: recusa *_KEY/*_TOKEN/*_SECRET e auth.env/${VAR} do providers.toml (erro de config → needs_lead). 5 testes novos (OPENKAX_FAKE_API_KEY=vazou-123 não aparece no log; controle com passthrough; PATH/git --version; validação). 137 unitários + demais suítes verdes. cargo build com link MSVC conferido no Windows só com a allowlist. Não fecha leitura do .env em disco: ver ADR 0007, Modelo de ameaça"
     }
   ]
 }
