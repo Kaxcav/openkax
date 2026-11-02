@@ -176,16 +176,14 @@ pub fn two_provider_config(groq_url: &str, gemini_url: &str) -> String {
         id = "groq"
         base_url = "{groq_url}"
         auth = {{ kind = "bearer", env = "GROQ_API_KEY" }}
-        models = ["qwen-coder"]
-        limits = {{ rpm = 30, tpm = 8000, max_ctx = 128000 }}
+        models = [{{ id = "qwen-coder", upstream = "qwen-coder", max_ctx = 128000, limits = {{ rpm = 30, tpm = 8000 }} }}]
         cooldown = {{ on_429_s = 60 }}
 
         [[provider]]
         id = "gemini"
         base_url = "{gemini_url}"
         auth = {{ kind = "bearer", env = "GEMINI_API_KEY" }}
-        models = ["gemini-flash"]
-        limits = {{ rpm = 30, tpm = 250000, max_ctx = 1000000 }}
+        models = [{{ id = "gemini-flash", upstream = "gemini-flash", max_ctx = 1000000, limits = {{ rpm = 30, tpm = 250000 }} }}]
 
         [[class]]
         id = "kax/coder-fast"

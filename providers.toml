@@ -1,20 +1,28 @@
-# providers.toml — provider é dado, não código (PLANO_MESTRE §3.2).
+# providers.toml — provider é dado, não código (PLANO_MESTRE §3.2, ADR 0003).
 # Limites são voláteis (nov/2026): `openkax doctor` / `./doctor.sh` para conferir.
 # Chaves NUNCA aqui: só o nome da variável de ambiente em `auth.env`.
+#
+# Escopos de limite (ADR 0003):
+#   [[provider]].limits      → compartilhado pela conta/workspace (Mistral, OpenRouter, DeepSeek)
+#   models[].limits/max_ctx  → por modelo (Groq, Gemini, GitHub Models)
+# `models[].id` é o nome local usado nas rotas; `upstream` é o ID real, conferido em /models.
 
 [defaults]
 request_timeout_ms = 60000
 first_token_timeout_ms = 8000
 estimate_chars_per_token = 3.6     # recalibrado por provider via `usage`
 safety_factor = 1.0
-daily_reset_utc = "00:00"          # reset de RPD/TPD quando o provider não define `limits.reset_utc`
+daily_reset_utc = "00:00"          # reset de RPD/TPD quando o escopo não define `limits.reset_utc`
 
 [[provider]]
 id = "gemini"
 base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
 auth = { kind = "bearer", env = "GEMINI_API_KEY" }
-models = ["gemini-flash", "gemini-flash-lite"]
-limits = { rpm = 10, tpm = 250000, rpd = 250, max_ctx = 1000000 }
+# Free tier limita por modelo. Números do plano §1.2; conferir no AI Studio.
+models = [
+  { id = "gemini-flash", upstream = "gemini-flash-latest", max_ctx = 1000000, limits = { rpm = 10, tpm = 250000, rpd = 250 } },
+  { id = "gemini-flash-lite", upstream = "gemini-flash-lite-latest", max_ctx = 1000000, limits = { rpm = 10, tpm = 250000, rpd = 250 } },
+]
 quirks = { strip_params = ["logprobs", "frequency_penalty"], tool_choice = "auto_only" }
 cooldown = { on_429_s = 60, on_5xx_s = 20, on_timeout_s = 30, on_4xx_other_s = 600 }
 
@@ -22,29 +30,61 @@ cooldown = { on_429_s = 60, on_5xx_s = 20, on_timeout_s = 30, on_4xx_other_s = 6
 id = "groq"
 base_url = "https://api.groq.com/openai/v1"
 auth = { kind = "bearer", env = "GROQ_API_KEY" }
-models = ["qwen-coder", "llama-70b"]
-limits = { rpm = 30, tpm = 8000, rpd = 1000, tpd = 200000, max_ctx = 128000 }
+# Desligado: /models devolveu 403 "Access denied. Please check your network settings"
+# (bloqueio de rede, não de chave) em 2026-11-02. Rode ./doctor.sh de outra rede,
+# preencha `upstream` com IDs reais e remova `enabled = false`.
+enabled = false
+models = [
+  { id = "qwen-coder", max_ctx = 128000, limits = { rpm = 30, tpm = 8000, rpd = 1000, tpd = 200000 } },
+  { id = "llama-70b", max_ctx = 128000, limits = { rpm = 30, tpm = 8000, rpd = 1000, tpd = 200000 } },
+]
+# Groq conta max_tokens no TPM: reserva entrada + min(max_tokens, cap) e clampa no cap.
+# 6000 (pacote máx. do coder-fast) + 2000 = 8000 TPM.
+quirks = { tpm_counts_max_tokens = true, max_tokens_cap = 2000 }
 
 [[provider]]
 id = "mistral"
 base_url = "https://api.mistral.ai/v1"
 auth = { kind = "bearer", env = "MISTRAL_API_KEY" }
-models = ["codestral-latest", "mistral-medium-latest"]
+models = [
+  { id = "codestral", upstream = "codestral-latest" },
+  { id = "mistral-medium", upstream = "mistral-medium-latest" },
+]
 limits = { rpm = 2, tpm = 500000, tokens_per_month = 1000000000 }
+
+[[provider]]
+id = "github"
+base_url = "https://models.github.ai/inference"
+auth = { kind = "bearer", env = "GITHUB_MODELS_TOKEN" }
+# Desligado: o catálogo (models.github.ai/catalog/models) respondeu "OK" em text/plain
+# para qualquer URL, até sem auth (proxy de rede?) em 2026-11-02. Conferir de outra
+# rede e preencher `upstream`. Limites do tier "low" (teto de entrada pequeno).
+enabled = false
+models = [
+  { id = "github-mini", max_ctx = 8000, limits = { rpm = 15, rpd = 150 } },
+]
 
 [[provider]]
 id = "openrouter"
 base_url = "https://openrouter.ai/api/v1"
 auth = { kind = "bearer", env = "OPENROUTER_API_KEY" }
 extra_headers = { "HTTP-Referer" = "http://localhost", "X-Title" = "OpenKax" }
-models = ["qwen/qwen3-coder:free", "deepseek/deepseek-chat:free"]
+# Os :free do plano (qwen3-coder, deepseek-chat) sumiram do catálogo; estes estão em /models.
+models = [
+  { id = "north-mini-code", upstream = "cohere/north-mini-code:free", max_ctx = 256000 },
+  { id = "gemma-4-31b", upstream = "google/gemma-4-31b-it:free", max_ctx = 262144 },
+]
 limits = { rpm = 20, rpd = 1000 }
 
 [[provider]]
 id = "deepseek"
 base_url = "https://api.deepseek.com/v1"
 auth = { kind = "bearer", env = "DEEPSEEK_API_KEY" }
-models = ["deepseek-chat"]
+# deepseek-chat não está mais em /models; atuais: deepseek-flash, deepseek-v4-pro.
+models = [
+  { id = "deepseek-flash", upstream = "deepseek-flash" },
+  { id = "deepseek-pro", upstream = "deepseek-v4-pro" },
+]
 limits = { rpm = 60 }
 paid = true
 
@@ -55,6 +95,7 @@ auth = { kind = "passthrough" }        # repassa Authorization/x-api-key do clie
 native = "anthropic"
 
 # ---------------------------------------------------------------- classes (§1.1)
+# Pago sempre por último (validado no parse).
 
 [[class]]
 id = "kax/coder-fast"
@@ -62,18 +103,19 @@ max_packet_tokens = 6000
 route = [
   { provider = "groq", model = "qwen-coder" },
   { provider = "gemini", model = "gemini-flash" },
-  { provider = "deepseek", model = "deepseek-chat" },
+  { provider = "deepseek", model = "deepseek-flash" },
 ]
 
 [[class]]
 id = "kax/coder-smart"
 max_packet_tokens = 60000
-# Haiku (pago) como último degrau entra na Fase 1, junto com o translator.
+# Haiku (pago) como degrau explícito entra na Fase 1, junto com o translator.
 route = [
   { provider = "gemini", model = "gemini-flash" },
-  { provider = "mistral", model = "codestral-latest" },
-  { provider = "deepseek", model = "deepseek-chat" },
-  { provider = "openrouter", model = "qwen/qwen3-coder:free" },
+  { provider = "mistral", model = "codestral" },
+  { provider = "github", model = "github-mini" },
+  { provider = "openrouter", model = "north-mini-code" },
+  { provider = "deepseek", model = "deepseek-flash" },
 ]
 
 [[class]]
@@ -82,16 +124,16 @@ max_packet_tokens = 200000
 route = [
   { provider = "gemini", model = "gemini-flash-lite" },
   { provider = "gemini", model = "gemini-flash" },
-  { provider = "openrouter", model = "deepseek/deepseek-chat:free" },
+  { provider = "openrouter", model = "gemma-4-31b" },
 ]
 
 [[class]]
 id = "kax/reviewer"
 max_packet_tokens = 60000
 route = [
-  { provider = "mistral", model = "mistral-medium-latest" },
+  { provider = "mistral", model = "mistral-medium" },
   { provider = "gemini", model = "gemini-flash" },
-  { provider = "deepseek", model = "deepseek-chat" },
+  { provider = "deepseek", model = "deepseek-pro" },
 ]
 
 [[class]]
@@ -99,5 +141,5 @@ id = "kax/cheap-long"
 max_packet_tokens = 500000
 route = [
   { provider = "gemini", model = "gemini-flash" },
-  { provider = "mistral", model = "mistral-medium-latest" },
+  { provider = "mistral", model = "mistral-medium" },
 ]

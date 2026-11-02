@@ -4,6 +4,10 @@
 //! provider (URL, auth, limites, quirks, cooldowns) mora aqui. Este módulo só
 //! faz parse + validação; estado de runtime (buckets, cooldown) fica no
 //! `scheduler`.
+//!
+//! Limites têm dois escopos (ADR 0003): `[[provider]].limits` é o escopo
+//! compartilhado da conta/workspace; `models[].limits` é o escopo do modelo.
+//! Qualquer um pode faltar.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
@@ -36,7 +40,7 @@ pub struct Defaults {
     pub estimate_chars_per_token: f64,
     /// Multiplicador sobre a estimativa de tokens antes de checar buckets.
     pub safety_factor: f64,
-    /// Horário (UTC) de reset dos buckets diários quando o provider não define.
+    /// Horário (UTC) de reset dos buckets diários quando o escopo não define.
     pub daily_reset_utc: UtcTime,
 }
 
@@ -59,8 +63,12 @@ pub struct Provider {
     pub id: String,
     pub base_url: String,
     pub auth: Auth,
+    /// `false` → ignorado pelo scheduler (ex.: IDs de modelo ainda não verificados).
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub enabled: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub models: Vec<String>,
+    pub models: Vec<Model>,
+    /// Escopo compartilhado (conta/workspace).
     #[serde(default, skip_serializing_if = "Limits::is_unbounded")]
     pub limits: Limits,
     #[serde(default, skip_serializing_if = "Quirks::is_empty")]
@@ -70,7 +78,7 @@ pub struct Provider {
     pub cooldown: Option<Cooldown>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra_headers: BTreeMap<String, String>,
-    /// Degrau pago (relatórios destacam requests que caíram aqui).
+    /// Degrau pago: sempre depois dos gratuitos em qualquer rota.
     #[serde(default, skip_serializing_if = "is_false")]
     pub paid: bool,
     /// Protocolo nativo; ausente = OpenAI Chat Completions.
@@ -86,6 +94,27 @@ impl Provider {
     pub fn cooldown(&self) -> Cooldown {
         self.cooldown.clone().unwrap_or_default()
     }
+
+    pub fn model(&self, id: &str) -> Option<&Model> {
+        self.models.iter().find(|m| m.id == id)
+    }
+}
+
+/// Modelo de um provider: `id` é o nome local usado nas rotas; `upstream` é
+/// o ID real enviado ao provider (conferido em `/models`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Model {
+    pub id: String,
+    /// Obrigatório em provider habilitado.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<String>,
+    /// Escopo do modelo (ex.: Groq e Gemini limitam por modelo).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<Limits>,
+    /// Sobrescreve `provider.limits.max_ctx`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_ctx: Option<u32>,
 }
 
 /// Como autenticar no upstream. A chave em si nunca está no TOML: só o nome
@@ -107,7 +136,7 @@ pub enum Native {
     Anthropic,
 }
 
-/// Limites declarados. `None` = sem limite conhecido.
+/// Limites declarados de um escopo. `None` = sem limite conhecido.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
@@ -119,11 +148,13 @@ pub struct Limits {
     pub rpd: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tpd: Option<u64>,
+    /// Só no escopo do provider; no modelo use `models[].max_ctx`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_ctx: Option<u32>,
+    /// Informativo na Fase 0 (sem persistência, contador mensal não faz sentido).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens_per_month: Option<u64>,
-    /// Sobrescreve [`Defaults::daily_reset_utc`] para RPD/TPD.
+    /// Sobrescreve o horário de reset de RPD/TPD deste escopo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset_utc: Option<UtcTime>,
 }
@@ -131,6 +162,10 @@ pub struct Limits {
 impl Limits {
     pub fn is_unbounded(&self) -> bool {
         *self == Self::default()
+    }
+
+    pub fn has_daily(&self) -> bool {
+        self.rpd.is_some() || self.tpd.is_some()
     }
 }
 
@@ -143,6 +178,15 @@ pub struct Quirks {
     pub strip_params: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoiceQuirk>,
+    /// Provider não aceita `stream_options.include_usage`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub no_stream_usage: bool,
+    /// Provider conta `max_tokens` no TPM (Groq): reserva entrada + saída.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub tpm_counts_max_tokens: bool,
+    /// Teto de `max_tokens` enviado ao upstream (clamp).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens_cap: Option<u32>,
 }
 
 impl Quirks {
@@ -164,9 +208,11 @@ pub enum ToolChoiceQuirk {
 pub struct Cooldown {
     /// 429 sem `Retry-After` utilizável.
     pub on_429_s: u64,
+    /// 5xx, erro de protocolo, morte pós-1º-token vinda do upstream.
     pub on_5xx_s: u64,
+    /// Timeout de 1º token / total, erro de rede.
     pub on_timeout_s: u64,
-    /// 4xx que não é culpa da request nem auth (ex.: 404 modelo inexistente).
+    /// 4xx que não é culpa da request, nem auth, nem 404.
     pub on_4xx_other_s: u64,
 }
 
@@ -196,6 +242,7 @@ pub struct Class {
 #[serde(deny_unknown_fields)]
 pub struct RouteStep {
     pub provider: String,
+    /// `models[].id` do provider.
     pub model: String,
 }
 
@@ -321,42 +368,9 @@ impl Config {
 
         let mut ids = HashSet::new();
         for p in &self.providers {
+            validate_provider(p, &mut errs);
             if !ids.insert(p.id.as_str()) {
                 errs.push(format!("provider duplicado: {:?}", p.id));
-            }
-            if !(p.base_url.starts_with("http://") || p.base_url.starts_with("https://")) {
-                errs.push(format!("provider {:?}: base_url deve ser http(s)", p.id));
-            }
-            if let Auth::Bearer { env } = &p.auth
-                && env.trim().is_empty()
-            {
-                errs.push(format!("provider {:?}: auth.env vazio", p.id));
-            }
-            if p.native.is_none() && p.auth == Auth::Passthrough {
-                errs.push(format!(
-                    "provider {:?}: auth passthrough exige native",
-                    p.id
-                ));
-            }
-            if let Some(sf) = p.safety_factor
-                && (sf.is_nan() || sf < 1.0)
-            {
-                errs.push(format!(
-                    "provider {:?}: safety_factor deve ser >= 1.0",
-                    p.id
-                ));
-            }
-            for (name, v) in [
-                ("rpm", p.limits.rpm),
-                ("tpm", p.limits.tpm),
-                ("rpd", p.limits.rpd),
-            ] {
-                if v == Some(0) {
-                    errs.push(format!(
-                        "provider {:?}: limits.{name} = 0 (remova o provider)",
-                        p.id
-                    ));
-                }
             }
         }
 
@@ -371,6 +385,7 @@ impl Config {
             if c.route.is_empty() {
                 errs.push(format!("classe {:?}: route vazia", c.id));
             }
+            let mut seen_paid = false;
             for (i, step) in c.route.iter().enumerate() {
                 let Some(p) = self.provider(&step.provider) else {
                     errs.push(format!(
@@ -379,7 +394,7 @@ impl Config {
                     ));
                     continue;
                 };
-                if !p.models.iter().any(|m| m == &step.model) {
+                if p.native.is_none() && p.model(&step.model).is_none() {
                     errs.push(format!(
                         "classe {:?}: modelo {:?} não listado em provider {:?}",
                         c.id, step.model, p.id
@@ -392,6 +407,14 @@ impl Config {
                         c.id
                     ));
                 }
+                if p.paid {
+                    seen_paid = true;
+                } else if seen_paid {
+                    errs.push(format!(
+                        "classe {:?}: degrau gratuito {:?} depois de um pago (pago sempre por último)",
+                        c.id, p.id
+                    ));
+                }
             }
         }
 
@@ -401,6 +424,75 @@ impl Config {
             Err(ConfigError::Invalid(errs))
         }
     }
+}
+
+fn validate_provider(p: &Provider, errs: &mut Vec<String>) {
+    let id = &p.id;
+    if !(p.base_url.starts_with("http://") || p.base_url.starts_with("https://")) {
+        errs.push(format!("provider {id:?}: base_url deve ser http(s)"));
+    }
+    if let Auth::Bearer { env } = &p.auth
+        && env.trim().is_empty()
+    {
+        errs.push(format!("provider {id:?}: auth.env vazio"));
+    }
+    if p.native.is_none() && p.auth == Auth::Passthrough {
+        errs.push(format!("provider {id:?}: auth passthrough exige native"));
+    }
+    if let Some(sf) = p.safety_factor
+        && (sf.is_nan() || sf < 1.0)
+    {
+        errs.push(format!("provider {id:?}: safety_factor deve ser >= 1.0"));
+    }
+    if p.quirks.max_tokens_cap == Some(0) {
+        errs.push(format!("provider {id:?}: quirks.max_tokens_cap = 0"));
+    }
+    validate_limits(&p.limits, &format!("provider {id:?}: limits"), errs);
+
+    let mut model_ids = HashSet::new();
+    for m in &p.models {
+        let at = format!("provider {id:?}, modelo {:?}", m.id);
+        if !model_ids.insert(m.id.as_str()) {
+            errs.push(format!("{at}: id duplicado"));
+        }
+        let upstream_ok = m.upstream.as_deref().is_some_and(|u| !u.trim().is_empty());
+        if p.enabled && !upstream_ok {
+            errs.push(format!(
+                "{at}: `upstream` obrigatório em provider habilitado (confira em /models)"
+            ));
+        }
+        if let Some(l) = &m.limits {
+            if l.max_ctx.is_some() {
+                errs.push(format!(
+                    "{at}: use `max_ctx` do modelo, não `limits.max_ctx`"
+                ));
+            }
+            validate_limits(l, &format!("{at}: limits"), errs);
+        }
+    }
+}
+
+fn validate_limits(l: &Limits, at: &str, errs: &mut Vec<String>) {
+    let zero = [
+        ("rpm", l.rpm.map(u64::from)),
+        ("tpm", l.tpm.map(u64::from)),
+        ("rpd", l.rpd.map(u64::from)),
+        ("tpd", l.tpd),
+        ("max_ctx", l.max_ctx.map(u64::from)),
+    ];
+    for (name, v) in zero {
+        if v == Some(0) {
+            errs.push(format!("{at}.{name} = 0 (desabilite com enabled = false)"));
+        }
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
 }
 
 fn is_false(b: &bool) -> bool {
@@ -436,27 +528,32 @@ mod tests {
         assert_eq!(c.defaults.first_token_timeout_ms, 8000);
         assert_eq!(c.defaults.estimate_chars_per_token, 3.6);
 
-        let groq = c.provider("groq").unwrap();
-        assert_eq!(
-            groq.auth,
-            Auth::Bearer {
-                env: "GROQ_API_KEY".into()
-            }
-        );
-        assert_eq!(groq.limits.tpm, Some(8000));
-        assert_eq!(groq.limits.tpd, Some(200_000));
-        assert_eq!(groq.cooldown(), Cooldown::default());
-
+        // Gemini limita por modelo: escopo de provider vazio, limites no modelo.
         let gemini = c.provider("gemini").unwrap();
+        assert!(gemini.limits.rpm.is_none());
+        let flash = gemini.model("gemini-flash").unwrap();
+        assert!(flash.upstream.is_some());
+        assert_eq!(flash.limits.as_ref().unwrap().tpm, Some(250_000));
+        assert_eq!(flash.max_ctx, Some(1_000_000));
         assert_eq!(gemini.quirks.tool_choice, Some(ToolChoiceQuirk::AutoOnly));
-        assert_eq!(gemini.limits.max_ctx, Some(1_000_000));
+
+        // Mistral limita por conta: escopo de provider.
+        let mistral = c.provider("mistral").unwrap();
+        assert_eq!(mistral.limits.rpm, Some(2));
+        assert!(mistral.models.iter().all(|m| m.limits.is_none()));
+
+        let groq = c.provider("groq").unwrap();
+        assert!(groq.quirks.tpm_counts_max_tokens);
+        assert!(groq.quirks.max_tokens_cap.is_some());
+        let qwen = groq.model("qwen-coder").unwrap();
+        assert_eq!(qwen.limits.as_ref().unwrap().tpm, Some(8000));
 
         let or = c.provider("openrouter").unwrap();
         assert_eq!(
             or.extra_headers.get("X-Title").map(String::as_str),
             Some("OpenKax")
         );
-
+        assert!(c.provider("github").is_some());
         assert!(c.provider("deepseek").unwrap().paid);
         let anth = c.provider("anthropic").unwrap();
         assert_eq!(
@@ -475,12 +572,18 @@ mod tests {
         }
         let fast = c.class("kax/coder-fast").unwrap();
         assert_eq!(fast.max_packet_tokens, 6000);
+        assert_eq!(fast.route[0].provider, "groq");
+
+        let smart: Vec<_> = c
+            .class("kax/coder-smart")
+            .unwrap()
+            .route
+            .iter()
+            .map(|s| s.provider.as_str())
+            .collect();
         assert_eq!(
-            fast.route[0],
-            RouteStep {
-                provider: "groq".into(),
-                model: "qwen-coder".into()
-            }
+            smart,
+            ["gemini", "mistral", "github", "openrouter", "deepseek"]
         );
     }
 
@@ -525,7 +628,7 @@ mod tests {
             id = "a"
             base_url = "http://a"
             auth = { kind = "none" }
-            models = ["m1"]
+            models = [{ id = "m1", upstream = "u1" }, { id = "m2" }]
 
             [[provider]]
             id = "a"
@@ -549,9 +652,72 @@ mod tests {
             "deve começar com \"kax/\"",
             "modelo \"nope\" não listado",
             "provider desconhecido \"ghost\"",
+            "modelo \"m2\": `upstream` obrigatório",
         ] {
             assert!(all.contains(needle), "faltou erro {needle:?} em:\n{all}");
         }
+    }
+
+    #[test]
+    fn disabled_provider_may_omit_upstream() {
+        let c = Config::from_toml_str(
+            r#"
+            [[provider]]
+            id = "a"
+            base_url = "http://a"
+            auth = { kind = "none" }
+            enabled = false
+            models = [{ id = "m", limits = { rpm = 1 }, max_ctx = 10 }]
+            "#,
+        )
+        .unwrap();
+        assert!(!c.providers[0].enabled);
+        assert!(c.to_toml_string().unwrap().contains("enabled = false"));
+    }
+
+    #[test]
+    fn model_limits_reject_max_ctx_and_zero() {
+        let errs = invalid(
+            r#"
+            [[provider]]
+            id = "a"
+            base_url = "http://a"
+            auth = { kind = "none" }
+            models = [{ id = "m", upstream = "u", limits = { max_ctx = 5, tpm = 0 } }]
+            "#,
+        );
+        let all = errs.join("\n");
+        assert!(all.contains("use `max_ctx` do modelo"), "{all}");
+        assert!(all.contains("limits.tpm = 0"), "{all}");
+    }
+
+    #[test]
+    fn paid_must_come_last() {
+        let errs = invalid(
+            r#"
+            [[provider]]
+            id = "paid"
+            base_url = "http://p"
+            auth = { kind = "none" }
+            paid = true
+            models = [{ id = "m", upstream = "u" }]
+
+            [[provider]]
+            id = "free"
+            base_url = "http://f"
+            auth = { kind = "none" }
+            models = [{ id = "m", upstream = "u" }]
+
+            [[class]]
+            id = "kax/x"
+            max_packet_tokens = 10
+            route = [{ provider = "paid", model = "m" }, { provider = "free", model = "m" }]
+            "#,
+        );
+        assert!(
+            errs.iter().any(|e| e.contains("pago sempre por último")),
+            "{errs:?}"
+        );
     }
 
     #[test]
@@ -563,13 +729,12 @@ mod tests {
             base_url = "https://api.anthropic.com"
             auth = { kind = "passthrough" }
             native = "anthropic"
-            models = ["claude-haiku"]
 
             [[provider]]
             id = "b"
             base_url = "http://b"
             auth = { kind = "none" }
-            models = ["m"]
+            models = [{ id = "m", upstream = "m" }]
 
             [[class]]
             id = "kax/x"

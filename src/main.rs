@@ -14,6 +14,8 @@ use openkax::provider::Secrets;
 use openkax::server::{self, AppState, Deps};
 
 fn main() -> ExitCode {
+    // rustls-no-provider: sem isto, o primeiro reqwest::Client dá panic (ADR 0002).
+    openkax::provider::install_crypto_provider();
     // .env só no dev; ausência não é erro.
     let _ = dotenvy::dotenv();
     tracing_subscriber::fmt()

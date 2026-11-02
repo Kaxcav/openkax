@@ -11,10 +11,12 @@ use std::time::{Duration, Instant};
 use common::*;
 use serde_json::json;
 use wiremock::matchers::{body_partial_json, header, method, path};
-use wiremock::{Mock, MockServer};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// Mock que só casa com a request certa: rota, auth e modelo reescrito.
 fn upstream(key: &str, model: &str) -> wiremock::MockBuilder {
+    // `stream: true` sempre: o gateway fala streaming com o upstream mesmo
+    // quando o cliente não pede.
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
         .and(header("authorization", format!("Bearer {key}").as_str()))
@@ -247,4 +249,74 @@ async fn harness_health() {
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
+}
+
+/// A3 (ADR 0003): erro de culpa da request → no máximo 1 candidato extra;
+/// dois seguidos → o erro do upstream volta ao cliente e o 3º degrau não é
+/// chamado (não queima RPM da rota inteira).
+#[tokio::test]
+async fn request_fault_tries_one_extra_candidate_then_returns_to_client() {
+    let (a, b) = mocks().await;
+    let c = MockServer::start().await;
+    let bad = ResponseTemplate::new(400).set_body_json(
+        json!({ "error": { "message": "unsupported param", "type": "invalid_request_error" } }),
+    );
+    upstream("k", "ma")
+        .respond_with(bad.clone())
+        .expect(1)
+        .mount(&a)
+        .await;
+    upstream("k", "mb")
+        .respond_with(bad)
+        .expect(1)
+        .mount(&b)
+        .await;
+    upstream("k", "mc")
+        .respond_with(sse_ok("from-c"))
+        .expect(0)
+        .mount(&c)
+        .await;
+    let mut toml =
+        String::from("[defaults]\nfirst_token_timeout_ms = 300\nrequest_timeout_ms = 5000\n");
+    for (id, uri) in [("a", a.uri()), ("b", b.uri()), ("c", c.uri())] {
+        toml.push_str(&format!(
+            "[[provider]]\nid = \"{id}\"\nbase_url = \"{uri}\"\nauth = {{ kind = \"bearer\", env = \"K\" }}\nmodels = [{{ id = \"m{id}\", upstream = \"m{id}\" }}]\n"
+        ));
+    }
+    toml.push_str(
+        "[[class]]\nid = \"kax/coder-fast\"\nmax_packet_tokens = 60000\nroute = [{ provider = \"a\", model = \"ma\" }, { provider = \"b\", model = \"mb\" }, { provider = \"c\", model = \"mc\" }]\n",
+    );
+    let gw = Gateway::spawn(&toml, &[("K", "k")]).await;
+
+    let resp = gw
+        .http
+        .post(format!("{}/v1/chat/completions", gw.base))
+        .json(&json!({ "model": "kax/coder-fast", "stream": true, "messages": [{ "role": "user", "content": "oi" }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["message"], "unsupported param");
+
+    // contador visível em /quota
+    let q: serde_json::Value = gw
+        .http
+        .get(format!("{}/quota", gw.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let faults = |p: usize| q["providers"][p]["models"][0]["request_faults"].as_u64();
+    assert_eq!(
+        (faults(0), faults(1), faults(2)),
+        (Some(1), Some(1), Some(0)),
+        "{q}"
+    );
+
+    a.verify().await;
+    b.verify().await;
+    c.verify().await;
 }

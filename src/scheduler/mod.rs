@@ -1,0 +1,1062 @@
+//! Scheduler de quota (PLANO_MESTRE §3.3, ADR 0003).
+//!
+//! Responsável por: estado de cada provider e modelo ([`ProviderState`]),
+//! buckets RPM/TPM/RPD/TPD em dois escopos (provider e modelo), estimativa de
+//! tokens, escolha ordenada de [`Candidate`]s e reservas ([`Reservation`]).
+//! Não faz I/O e não tem `async`: o tempo vem de um [`Clock`] injetável e
+//! nenhum lock atravessa `.await`.
+
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant, SystemTime};
+
+use serde::Serialize;
+
+use crate::config::Config;
+use crate::provider::UpstreamError;
+use crate::translate::openai::{ChatCompletionRequest, Usage};
+
+/// Fonte de tempo. `now` (monotônico) para buckets e cooldowns; `utc_now`
+/// (relógio de parede) só para o reset diário de RPD/TPD.
+pub trait Clock: Send + Sync + 'static {
+    fn now(&self) -> Instant;
+    fn utc_now(&self) -> SystemTime;
+}
+
+/// Relógio real.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn utc_now(&self) -> SystemTime {
+        SystemTime::now()
+    }
+}
+
+/// Relógio manual para testes: só anda com [`advance`](Self::advance).
+#[derive(Debug)]
+pub struct ManualClock {
+    at: Mutex<(Instant, SystemTime)>,
+}
+
+impl ManualClock {
+    pub fn new(utc: SystemTime) -> Self {
+        Self {
+            at: Mutex::new((Instant::now(), utc)),
+        }
+    }
+
+    /// Avança monotônico e parede juntos.
+    pub fn advance(&self, d: Duration) {
+        let mut g = lock(&self.at);
+        g.0 += d;
+        g.1 += d;
+    }
+}
+
+impl Clock for ManualClock {
+    fn now(&self) -> Instant {
+        lock(&self.at).0
+    }
+
+    fn utc_now(&self) -> SystemTime {
+        lock(&self.at).1
+    }
+}
+
+/// Máquina de estados de um escopo (provider ou modelo):
+/// `Healthy → Cooldown(until) → Healthy`; `Disabled` até reload;
+/// `Degraded` (aceitação baixa) entra na Fase 3.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderState {
+    Healthy,
+    Cooldown { until: Instant },
+    Disabled { reason: DisabledReason },
+    Degraded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisabledReason {
+    /// Sem chave no ambiente.
+    MissingKey,
+    /// 401/403: não adianta repetir até reload.
+    AuthRejected,
+    /// 404: só o modelo.
+    ModelNotFound,
+    /// `enabled = false` no TOML.
+    ConfigDisabled,
+    /// Protocolo ainda não suportado nesta rota (nativo Anthropic até a Fase 1).
+    Unsupported,
+}
+
+/// Um degrau elegível da rota, na ordem de fallback.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Candidate {
+    /// Índice em `Config::providers`.
+    pub provider_idx: usize,
+    /// Índice em `Provider::models`.
+    pub model_idx: usize,
+    pub provider_id: Arc<str>,
+    pub model_id: Arc<str>,
+    /// ID real enviado ao provider.
+    pub upstream_model: Arc<str>,
+    /// Chars de texto da request (base da recalibração).
+    pub input_chars: usize,
+    /// Tokens de entrada estimados (com `safety_factor`).
+    pub est_tokens: u32,
+    /// O que será debitado no TPM/TPD: entrada (+ saída com `tpm_counts_max_tokens`).
+    pub reserve_tokens: u32,
+    /// `max_tokens` a enviar ao upstream quando há `max_tokens_cap`.
+    pub max_tokens_override: Option<u32>,
+}
+
+/// Por que um degrau ficou fora da lista de candidatos.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Skip {
+    /// Nunca vai caber: `est > max_ctx` ou `reserva > capacidade de TPM/TPD`.
+    NeverFits,
+    /// Cabe, mas não agora: falta saldo. Entra no cálculo do `Retry-After`.
+    NotNow {
+        ready_in: Duration,
+    },
+    Cooldown {
+        ready_in: Duration,
+    },
+    Disabled(DisabledReason),
+}
+
+/// Resultado de [`Scheduler::pick`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pick {
+    pub candidates: Vec<Candidate>,
+    /// `(índice do degrau na rota, motivo)`.
+    pub skipped: Vec<(usize, Skip)>,
+}
+
+impl Pick {
+    /// Menor tempo até algum degrau pulado voltar (`NotNow`/`Cooldown`).
+    /// `None` quando nenhum volta sozinho (todos `NeverFits`/`Disabled`).
+    pub fn retry_after(&self) -> Option<Duration> {
+        self.skipped
+            .iter()
+            .filter_map(|(_, s)| match s {
+                Skip::NotNow { ready_in } | Skip::Cooldown { ready_in } => Some(*ready_in),
+                Skip::NeverFits | Skip::Disabled(_) => None,
+            })
+            .min()
+    }
+
+    /// Todos os degraus pulados por "nunca cabe".
+    pub fn all_never_fit(&self) -> bool {
+        self.candidates.is_empty()
+            && !self.skipped.is_empty()
+            && self.skipped.iter().all(|(_, s)| *s == Skip::NeverFits)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PickError {
+    #[error("classe desconhecida: {0}")]
+    UnknownClass(String),
+    #[error("pacote de {est} tokens excede max_packet_tokens={max} da classe")]
+    PacketTooLarge { est: u32, max: u32 },
+}
+
+/// Recusa de [`Scheduler::reserve`]: o saldo mudou entre `pick` e `reserve`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("sem saldo para reservar (pronto em {ready_in:?})")]
+pub struct NotNow {
+    pub ready_in: Duration,
+}
+
+/// Saldo atual de um provider (escopo compartilhado) — `GET /quota`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct QuotaSnapshot {
+    pub providers: Vec<ProviderQuota>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProviderQuota {
+    pub id: String,
+    pub state: StateView,
+    pub chars_per_token: f64,
+    pub rpm_remaining: Option<i64>,
+    pub tpm_remaining: Option<i64>,
+    pub rpd_remaining: Option<i64>,
+    pub tpd_remaining: Option<i64>,
+    pub models: Vec<ModelQuota>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ModelQuota {
+    pub id: String,
+    pub upstream: Option<String>,
+    pub state: StateView,
+    /// 400/413/422 recebidos (A3): quirk errado não pode ficar invisível.
+    pub request_faults: u64,
+    pub rpm_remaining: Option<i64>,
+    pub tpm_remaining: Option<i64>,
+    pub rpd_remaining: Option<i64>,
+    pub tpd_remaining: Option<i64>,
+}
+
+/// [`ProviderState`] serializável (sem `Instant`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum StateView {
+    Healthy,
+    Cooldown { ready_in_s: f64 },
+    Disabled { reason: DisabledReason },
+    Degraded,
+}
+
+/// Estado vivo de todos os providers. Barato de clonar.
+#[derive(Clone)]
+pub struct Scheduler {
+    shared: Arc<Shared>,
+}
+
+const DAY_SECS: i64 = 86_400;
+/// Overhead fixo por mensagem (role, separadores do template de chat).
+const TOKENS_PER_MESSAGE: u32 = 4;
+/// Parte não-texto (imagem, áudio) conta como este tanto de chars.
+const NON_TEXT_PART_CHARS: usize = 1000;
+const EMA_ALPHA: f64 = 0.2;
+const CPT_MIN: f64 = 1.5;
+const CPT_MAX: f64 = 8.0;
+const MIN_COOLDOWN: Duration = Duration::from_secs(1);
+
+struct Shared {
+    clock: Arc<dyn Clock>,
+    default_cpt: f64,
+    providers: Vec<ProviderRt>,
+    classes: Vec<ClassRt>,
+}
+
+struct ProviderRt {
+    id: Arc<str>,
+    cooldown: crate::config::Cooldown,
+    safety: f64,
+    tpm_counts_max_tokens: bool,
+    max_tokens_cap: Option<u32>,
+    /// Lock 1 (sempre antes do lock do modelo).
+    state: Mutex<ProviderScope>,
+    models: Vec<ModelRt>,
+}
+
+struct ProviderScope {
+    scope: Scope,
+    chars_per_token: f64,
+}
+
+struct ModelRt {
+    id: Arc<str>,
+    upstream: Option<Arc<str>>,
+    max_ctx: Option<u32>,
+    /// Tem `limits` próprios → 429 cai neste escopo.
+    own_limits: bool,
+    /// Lock 2.
+    scope: Mutex<Scope>,
+}
+
+struct ClassRt {
+    id: String,
+    max_packet_tokens: u32,
+    /// `None` = degrau sem modelo OpenAI-compat (nativo Anthropic, Fase 1).
+    steps: Vec<Option<(usize, usize)>>,
+}
+
+/// Bucket de refill contínuo (RPM/TPM). `level` pode ficar negativo (dívida
+/// após `settle` acima da reserva), o que freia o escopo naturalmente.
+#[derive(Debug)]
+struct Rate {
+    cap: f64,
+    level: f64,
+    per_sec: f64,
+    last: Instant,
+}
+
+impl Rate {
+    fn new(limit: u64, now: Instant) -> Self {
+        let cap = limit as f64;
+        Self {
+            cap,
+            level: cap,
+            per_sec: cap / 60.0,
+            last: now,
+        }
+    }
+
+    fn refill(&mut self, now: Instant) {
+        if now > self.last {
+            let dt = (now - self.last).as_secs_f64();
+            self.level = (self.level + dt * self.per_sec).min(self.cap);
+            self.last = now;
+        }
+    }
+
+    fn wait_for(&self, amount: f64) -> Duration {
+        if self.level >= amount {
+            Duration::ZERO
+        } else {
+            Duration::from_secs_f64((amount - self.level) / self.per_sec)
+        }
+    }
+
+    fn remaining(&self) -> i64 {
+        self.level.floor() as i64
+    }
+}
+
+/// Contador de janela diária (RPD/TPD) com reset num horário UTC.
+#[derive(Debug)]
+struct Daily {
+    limit: u64,
+    used: i64,
+    window: i64,
+}
+
+impl Daily {
+    fn remaining(&self) -> i64 {
+        self.limit as i64 - self.used
+    }
+}
+
+/// Um escopo de limite: buckets + estado.
+#[derive(Debug)]
+struct Scope {
+    rpm: Option<Rate>,
+    tpm: Option<Rate>,
+    rpd: Option<Daily>,
+    tpd: Option<Daily>,
+    /// Segundos do dia (UTC) em que RPD/TPD resetam.
+    reset_offset: i64,
+    has_daily: bool,
+    cooldown_until: Option<Instant>,
+    disabled: Option<DisabledReason>,
+    request_faults: u64,
+}
+
+impl Scope {
+    fn new(
+        limits: Option<&crate::config::Limits>,
+        default_reset: crate::config::UtcTime,
+        now: Instant,
+        utc: i64,
+    ) -> Self {
+        let reset = limits.and_then(|l| l.reset_utc).unwrap_or(default_reset);
+        let reset_offset = i64::from(reset.seconds_of_day());
+        let window = (utc - reset_offset).div_euclid(DAY_SECS);
+        let daily = |limit: u64| Daily {
+            limit,
+            used: 0,
+            window,
+        };
+        Self {
+            rpm: limits.and_then(|l| l.rpm).map(|v| Rate::new(v.into(), now)),
+            tpm: limits.and_then(|l| l.tpm).map(|v| Rate::new(v.into(), now)),
+            rpd: limits.and_then(|l| l.rpd).map(|v| daily(v.into())),
+            tpd: limits.and_then(|l| l.tpd).map(daily),
+            reset_offset,
+            has_daily: limits.is_some_and(crate::config::Limits::has_daily),
+            cooldown_until: None,
+            disabled: None,
+            request_faults: 0,
+        }
+    }
+
+    /// Refill, virada de janela diária e expiração de cooldown.
+    fn tick(&mut self, now: Instant, utc: i64) {
+        for r in [&mut self.rpm, &mut self.tpm].into_iter().flatten() {
+            r.refill(now);
+        }
+        let window = (utc - self.reset_offset).div_euclid(DAY_SECS);
+        for d in [&mut self.rpd, &mut self.tpd].into_iter().flatten() {
+            if d.window != window {
+                d.window = window;
+                d.used = 0;
+            }
+        }
+        if self.cooldown_until.is_some_and(|u| u <= now) {
+            self.cooldown_until = None;
+        }
+    }
+
+    fn secs_to_reset(&self, utc: i64) -> Duration {
+        let into = (utc - self.reset_offset).rem_euclid(DAY_SECS);
+        Duration::from_secs((DAY_SECS - into) as u64)
+    }
+
+    fn daily_exhausted(&self) -> bool {
+        [&self.rpd, &self.tpd]
+            .into_iter()
+            .flatten()
+            .any(|d| d.remaining() <= 0)
+    }
+
+    /// Ordem: desabilitado → nunca cabe → cooldown → sem saldo agora.
+    fn gate(&self, tokens: u32, now: Instant, utc: i64) -> Result<(), Skip> {
+        if let Some(reason) = self.disabled {
+            return Err(Skip::Disabled(reason));
+        }
+        let t = f64::from(tokens);
+        if self.tpm.as_ref().is_some_and(|r| r.cap < t)
+            || self.tpd.as_ref().is_some_and(|d| (d.limit as f64) < t)
+        {
+            return Err(Skip::NeverFits);
+        }
+        if let Some(until) = self.cooldown_until.filter(|u| *u > now) {
+            return Err(Skip::Cooldown {
+                ready_in: until - now,
+            });
+        }
+        let mut wait = Duration::ZERO;
+        if let Some(r) = &self.rpm {
+            wait = wait.max(r.wait_for(1.0));
+        }
+        if let Some(r) = &self.tpm {
+            wait = wait.max(r.wait_for(t));
+        }
+        let rpd_out = self.rpd.as_ref().is_some_and(|d| d.remaining() < 1);
+        let tpd_out = self
+            .tpd
+            .as_ref()
+            .is_some_and(|d| d.remaining() < i64::from(tokens));
+        if rpd_out || tpd_out {
+            wait = wait.max(self.secs_to_reset(utc));
+        }
+        if wait > Duration::ZERO {
+            Err(Skip::NotNow { ready_in: wait })
+        } else {
+            Ok(())
+        }
+    }
+
+    fn charge_request(&mut self) {
+        if let Some(r) = &mut self.rpm {
+            r.level -= 1.0;
+        }
+        if let Some(d) = &mut self.rpd {
+            d.used += 1;
+        }
+    }
+
+    /// `delta > 0` cobra, `delta < 0` devolve (limitado à capacidade).
+    fn adjust_tokens(&mut self, delta: i64) {
+        if let Some(r) = &mut self.tpm {
+            r.level = (r.level - delta as f64).min(r.cap);
+        }
+        if let Some(d) = &mut self.tpd {
+            d.used = (d.used + delta).max(0);
+        }
+    }
+
+    fn drain_rpm(&mut self) {
+        if let Some(r) = &mut self.rpm {
+            r.level = r.level.min(0.0);
+        }
+    }
+
+    fn cool(&mut self, now: Instant, d: Duration) {
+        let until = now + d;
+        self.cooldown_until = Some(self.cooldown_until.map_or(until, |u| u.max(until)));
+    }
+
+    fn state(&self, now: Instant) -> ProviderState {
+        if let Some(reason) = self.disabled {
+            ProviderState::Disabled { reason }
+        } else if let Some(until) = self.cooldown_until.filter(|u| *u > now) {
+            ProviderState::Cooldown { until }
+        } else {
+            ProviderState::Healthy
+        }
+    }
+
+    fn view(&self, now: Instant) -> StateView {
+        match self.state(now) {
+            ProviderState::Healthy => StateView::Healthy,
+            ProviderState::Cooldown { until } => StateView::Cooldown {
+                ready_in_s: (until - now).as_secs_f64(),
+            },
+            ProviderState::Disabled { reason } => StateView::Disabled { reason },
+            ProviderState::Degraded => StateView::Degraded,
+        }
+    }
+
+    fn remaining(&self) -> [Option<i64>; 4] {
+        [
+            self.rpm.as_ref().map(Rate::remaining),
+            self.tpm.as_ref().map(Rate::remaining),
+            self.rpd.as_ref().map(Daily::remaining),
+            self.tpd.as_ref().map(Daily::remaining),
+        ]
+    }
+}
+
+/// Junta os vereditos dos dois escopos: o mais restritivo vence; entre
+/// esperas, a maior (só sai quando os dois liberarem).
+fn combine(a: Result<(), Skip>, b: Result<(), Skip>) -> Result<(), Skip> {
+    fn rank(s: &Skip) -> u8 {
+        match s {
+            Skip::Disabled(_) => 3,
+            Skip::NeverFits => 2,
+            Skip::Cooldown { .. } | Skip::NotNow { .. } => 1,
+        }
+    }
+    fn wait(s: &Skip) -> Duration {
+        match s {
+            Skip::Cooldown { ready_in } | Skip::NotNow { ready_in } => *ready_in,
+            _ => Duration::ZERO,
+        }
+    }
+    match (a, b) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(s), Ok(())) | (Ok(()), Err(s)) => Err(s),
+        (Err(x), Err(y)) => {
+            let pick_x = match rank(&x).cmp(&rank(&y)) {
+                std::cmp::Ordering::Greater => true,
+                std::cmp::Ordering::Less => false,
+                std::cmp::Ordering::Equal => wait(&x) >= wait(&y),
+            };
+            Err(if pick_x { x } else { y })
+        }
+    }
+}
+
+fn utc_secs(t: SystemTime) -> i64 {
+    match t.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(d) => d.as_secs() as i64,
+        Err(e) => -(e.duration().as_secs() as i64),
+    }
+}
+
+impl Scheduler {
+    /// `has_key(env)` diz se a chave existe (sem expor o valor).
+    pub fn new(config: &Config, clock: Arc<dyn Clock>, has_key: &dyn Fn(&str) -> bool) -> Self {
+        use crate::config::Auth;
+
+        let now = clock.now();
+        let utc = utc_secs(clock.utc_now());
+        let d = &config.defaults;
+        let providers = config
+            .providers
+            .iter()
+            .map(|p| {
+                let mut scope = Scope::new(Some(&p.limits), d.daily_reset_utc, now, utc);
+                scope.disabled = if !p.enabled {
+                    Some(DisabledReason::ConfigDisabled)
+                } else if p.native.is_some() {
+                    Some(DisabledReason::Unsupported)
+                } else {
+                    match &p.auth {
+                        Auth::Bearer { env } if !has_key(env) => Some(DisabledReason::MissingKey),
+                        _ => None,
+                    }
+                };
+                let models = p
+                    .models
+                    .iter()
+                    .map(|m| ModelRt {
+                        id: m.id.as_str().into(),
+                        upstream: m.upstream.as_deref().map(Into::into),
+                        max_ctx: m.max_ctx.or(p.limits.max_ctx),
+                        own_limits: m.limits.is_some(),
+                        scope: Mutex::new(Scope::new(
+                            m.limits.as_ref(),
+                            d.daily_reset_utc,
+                            now,
+                            utc,
+                        )),
+                    })
+                    .collect();
+                ProviderRt {
+                    id: p.id.as_str().into(),
+                    cooldown: p.cooldown(),
+                    safety: p.safety_factor.unwrap_or(d.safety_factor),
+                    tpm_counts_max_tokens: p.quirks.tpm_counts_max_tokens,
+                    max_tokens_cap: p.quirks.max_tokens_cap,
+                    state: Mutex::new(ProviderScope {
+                        scope,
+                        chars_per_token: d.estimate_chars_per_token,
+                    }),
+                    models,
+                }
+            })
+            .collect::<Vec<_>>();
+        let classes = config
+            .classes
+            .iter()
+            .map(|c| ClassRt {
+                id: c.id.clone(),
+                max_packet_tokens: c.max_packet_tokens,
+                steps: c
+                    .route
+                    .iter()
+                    .map(|s| {
+                        let pi = config.providers.iter().position(|p| p.id == s.provider)?;
+                        let mi = config.providers[pi]
+                            .models
+                            .iter()
+                            .position(|m| m.id == s.model)?;
+                        Some((pi, mi))
+                    })
+                    .collect(),
+            })
+            .collect();
+        Self {
+            shared: Arc::new(Shared {
+                clock,
+                default_cpt: d.estimate_chars_per_token,
+                providers,
+                classes,
+            }),
+        }
+    }
+
+    /// Filtra e ordena os degraus elegíveis de `class_id`. Não debita nada.
+    pub fn pick(&self, class_id: &str, request: &ChatCompletionRequest) -> Result<Pick, PickError> {
+        let sh = &*self.shared;
+        let class = sh
+            .classes
+            .iter()
+            .find(|c| c.id == class_id)
+            .ok_or_else(|| PickError::UnknownClass(class_id.to_owned()))?;
+        let (chars, messages) = request_text(request);
+        let packet = tokens_from(chars, messages, sh.default_cpt);
+        if packet > class.max_packet_tokens {
+            return Err(PickError::PacketTooLarge {
+                est: packet,
+                max: class.max_packet_tokens,
+            });
+        }
+        let requested_out = requested_max_tokens(request);
+        let now = sh.clock.now();
+        let utc = utc_secs(sh.clock.utc_now());
+
+        let mut pick = Pick {
+            candidates: Vec::new(),
+            skipped: Vec::new(),
+        };
+        for (i, step) in class.steps.iter().enumerate() {
+            let Some((pi, mi)) = *step else {
+                pick.skipped
+                    .push((i, Skip::Disabled(DisabledReason::Unsupported)));
+                continue;
+            };
+            let p = &sh.providers[pi];
+            let m = &p.models[mi];
+            let mut ps = lock(&p.state);
+            ps.scope.tick(now, utc);
+            let est = (f64::from(tokens_from(chars, messages, ps.chars_per_token)) * p.safety)
+                .ceil() as u32;
+            let (out_reserve, max_tokens_override) = p.output_plan(requested_out);
+            let reserve_tokens = est.saturating_add(out_reserve);
+
+            let verdict = if m.max_ctx.is_some_and(|ctx| est > ctx) {
+                Err(Skip::NeverFits)
+            } else {
+                let mut ms = lock(&m.scope);
+                ms.tick(now, utc);
+                combine(
+                    ps.scope.gate(reserve_tokens, now, utc),
+                    ms.gate(reserve_tokens, now, utc),
+                )
+            };
+            drop(ps);
+            match (verdict, &m.upstream) {
+                (Err(skip), _) => pick.skipped.push((i, skip)),
+                (Ok(()), None) => pick
+                    .skipped
+                    .push((i, Skip::Disabled(DisabledReason::ConfigDisabled))),
+                (Ok(()), Some(upstream)) => pick.candidates.push(Candidate {
+                    provider_idx: pi,
+                    model_idx: mi,
+                    provider_id: p.id.clone(),
+                    model_id: m.id.clone(),
+                    upstream_model: upstream.clone(),
+                    input_chars: chars,
+                    est_tokens: est,
+                    reserve_tokens,
+                    max_tokens_override,
+                }),
+            }
+        }
+        Ok(pick)
+    }
+
+    /// Re-checa e debita atomicamente (lock provider → modelo) 1 request e
+    /// `reserve_tokens` nos dois escopos.
+    pub fn reserve(&self, candidate: &Candidate) -> Result<Reservation, NotNow> {
+        let sh = &*self.shared;
+        let p = &sh.providers[candidate.provider_idx];
+        let m = &p.models[candidate.model_idx];
+        let now = sh.clock.now();
+        let utc = utc_secs(sh.clock.utc_now());
+        let tokens = candidate.reserve_tokens;
+        {
+            let mut ps = lock(&p.state);
+            let mut ms = lock(&m.scope);
+            ps.scope.tick(now, utc);
+            ms.tick(now, utc);
+            match combine(ps.scope.gate(tokens, now, utc), ms.gate(tokens, now, utc)) {
+                Ok(()) => {}
+                Err(Skip::NotNow { ready_in } | Skip::Cooldown { ready_in }) => {
+                    return Err(NotNow { ready_in });
+                }
+                Err(Skip::NeverFits | Skip::Disabled(_)) => {
+                    return Err(NotNow {
+                        ready_in: Duration::ZERO,
+                    });
+                }
+            }
+            for s in [&mut ps.scope, &mut *ms] {
+                s.charge_request();
+                s.adjust_tokens(i64::from(tokens));
+            }
+        }
+        Ok(Reservation {
+            shared: self.shared.clone(),
+            provider_idx: candidate.provider_idx,
+            model_idx: candidate.model_idx,
+            reserved: tokens,
+            input_chars: candidate.input_chars,
+            est_in: candidate.est_tokens,
+            output_chars: 0,
+            started: false,
+            closed: false,
+        })
+    }
+
+    pub fn provider_state(&self, provider_id: &str) -> Option<ProviderState> {
+        let sh = &*self.shared;
+        let p = sh.providers.iter().find(|p| &*p.id == provider_id)?;
+        let now = sh.clock.now();
+        let mut ps = lock(&p.state);
+        ps.scope.tick(now, utc_secs(sh.clock.utc_now()));
+        Some(ps.scope.state(now))
+    }
+
+    pub fn model_state(&self, provider_id: &str, model_id: &str) -> Option<ProviderState> {
+        let sh = &*self.shared;
+        let p = sh.providers.iter().find(|p| &*p.id == provider_id)?;
+        let m = p.models.iter().find(|m| &*m.id == model_id)?;
+        let now = sh.clock.now();
+        let mut ms = lock(&m.scope);
+        ms.tick(now, utc_secs(sh.clock.utc_now()));
+        Some(ms.state(now))
+    }
+
+    pub fn snapshot(&self) -> QuotaSnapshot {
+        let sh = &*self.shared;
+        let now = sh.clock.now();
+        let utc = utc_secs(sh.clock.utc_now());
+        let providers = sh
+            .providers
+            .iter()
+            .map(|p| {
+                let (state, cpt, [rpm, tpm, rpd, tpd]) = {
+                    let mut ps = lock(&p.state);
+                    ps.scope.tick(now, utc);
+                    (ps.scope.view(now), ps.chars_per_token, ps.scope.remaining())
+                };
+                let models = p
+                    .models
+                    .iter()
+                    .map(|m| {
+                        let mut ms = lock(&m.scope);
+                        ms.tick(now, utc);
+                        let [rpm, tpm, rpd, tpd] = ms.remaining();
+                        ModelQuota {
+                            id: m.id.to_string(),
+                            upstream: m.upstream.as_deref().map(str::to_owned),
+                            state: ms.view(now),
+                            request_faults: ms.request_faults,
+                            rpm_remaining: rpm,
+                            tpm_remaining: tpm,
+                            rpd_remaining: rpd,
+                            tpd_remaining: tpd,
+                        }
+                    })
+                    .collect();
+                ProviderQuota {
+                    id: p.id.to_string(),
+                    state,
+                    chars_per_token: cpt,
+                    rpm_remaining: rpm,
+                    tpm_remaining: tpm,
+                    rpd_remaining: rpd,
+                    tpd_remaining: tpd,
+                    models,
+                }
+            })
+            .collect();
+        QuotaSnapshot { providers }
+    }
+}
+
+impl ProviderRt {
+    /// Decisão 2 (ADR 0003): `(tokens de saída a reservar, max_tokens a enviar)`.
+    fn output_plan(&self, requested: Option<u32>) -> (u32, Option<u32>) {
+        let send = self
+            .max_tokens_cap
+            .map(|cap| requested.map_or(cap, |r| r.min(cap)));
+        let reserve = if self.tpm_counts_max_tokens {
+            send.or(requested).unwrap_or(0)
+        } else {
+            0
+        };
+        (reserve, send)
+    }
+}
+
+/// Débito provisório nos buckets, feito antes do envio (ADR 0003).
+///
+/// Fechamento explícito: [`settle`](Self::settle) ou [`fail`](Self::fail).
+/// `Drop` sem fechamento (cliente desconectou, future cancelado):
+/// antes do 1º token → devolve tokens; depois → cobra o estimado pelo texto
+/// transmitido. Nunca gera cooldown.
+pub struct Reservation {
+    shared: Arc<Shared>,
+    provider_idx: usize,
+    model_idx: usize,
+    reserved: u32,
+    input_chars: usize,
+    est_in: u32,
+    output_chars: usize,
+    started: bool,
+    closed: bool,
+}
+
+impl std::fmt::Debug for Reservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reservation")
+            .field("provider_idx", &self.provider_idx)
+            .field("model_idx", &self.model_idx)
+            .field("reserved", &self.reserved)
+            .field("started", &self.started)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Reservation {
+    /// Marca que o 1º token chegou: a partir daqui tokens não são devolvidos.
+    pub fn first_token(&mut self) {
+        self.started = true;
+    }
+
+    /// Chars de saída já transmitidos (base da estimativa sem `usage`).
+    pub fn add_output_chars(&mut self, n: usize) {
+        self.output_chars += n;
+    }
+
+    pub fn reserved_tokens(&self) -> u32 {
+        self.reserved
+    }
+
+    /// Sucesso: reconcilia com o `usage` real (refund ou charge) e recalibra chars/token.
+    pub fn settle(mut self, usage: Option<Usage>) {
+        self.close_settle(usage);
+    }
+
+    /// Falha vinda do upstream: aplica a transição de estado. Devolve o
+    /// cooldown aplicado (entra no `Retry-After`).
+    pub fn fail(mut self, error: &UpstreamError) -> Option<Duration> {
+        if self.started {
+            // Tokens foram gastos: cobra o estimado; instabilidade → on_5xx_s.
+            self.close_settle(None);
+            let p = &self.shared.providers[self.provider_idx];
+            let d = Duration::from_secs(p.cooldown.on_5xx_s).max(MIN_COOLDOWN);
+            let now = self.shared.clock.now();
+            lock(&p.state).scope.cool(now, d);
+            return Some(d);
+        }
+        self.close_refund();
+        self.transition(error)
+    }
+
+    fn transition(&self, error: &UpstreamError) -> Option<Duration> {
+        let sh = &*self.shared;
+        let p = &sh.providers[self.provider_idx];
+        let m = &p.models[self.model_idx];
+        let now = sh.clock.now();
+        let utc = utc_secs(sh.clock.utc_now());
+        let cd = &p.cooldown;
+        let mut ps = lock(&p.state);
+        let mut ms = lock(&m.scope);
+        ps.scope.tick(now, utc);
+        ms.tick(now, utc);
+
+        let provider_for = |secs: u64, ps: &mut ProviderScope| {
+            let d = Duration::from_secs(secs).max(MIN_COOLDOWN);
+            ps.scope.cool(now, d);
+            Some(d)
+        };
+        match error {
+            UpstreamError::RequestFault { .. } => {
+                ms.request_faults += 1;
+                None
+            }
+            UpstreamError::Auth { .. } => {
+                ps.scope.disabled = Some(DisabledReason::AuthRejected);
+                None
+            }
+            UpstreamError::NotFound { .. } => {
+                ms.disabled = Some(DisabledReason::ModelNotFound);
+                None
+            }
+            UpstreamError::RateLimited { retry_after, daily } => {
+                let target: &mut Scope = if m.own_limits { &mut ms } else { &mut ps.scope };
+                target.drain_rpm();
+                let to_reset = target.secs_to_reset(utc);
+                let d = if *daily || target.daily_exhausted() {
+                    to_reset
+                } else {
+                    let ceiling = if target.has_daily {
+                        to_reset
+                    } else {
+                        Duration::from_secs(DAY_SECS as u64)
+                    };
+                    retry_after
+                        .unwrap_or(Duration::from_secs(cd.on_429_s))
+                        .min(ceiling)
+                }
+                .max(MIN_COOLDOWN);
+                target.cool(now, d);
+                Some(d)
+            }
+            UpstreamError::Server { .. }
+            | UpstreamError::Protocol(_)
+            | UpstreamError::MidStream(_) => provider_for(cd.on_5xx_s, &mut ps),
+            UpstreamError::FirstTokenTimeout
+            | UpstreamError::RequestTimeout
+            | UpstreamError::Network(_) => provider_for(cd.on_timeout_s, &mut ps),
+            UpstreamError::OtherClient { .. } => provider_for(cd.on_4xx_other_s, &mut ps),
+        }
+    }
+
+    fn with_scopes(&self, f: impl FnOnce(&mut ProviderScope, &mut Scope)) {
+        let sh = &*self.shared;
+        let p = &sh.providers[self.provider_idx];
+        let m = &p.models[self.model_idx];
+        let now = sh.clock.now();
+        let utc = utc_secs(sh.clock.utc_now());
+        let mut ps = lock(&p.state);
+        let mut ms = lock(&m.scope);
+        ps.scope.tick(now, utc);
+        ms.tick(now, utc);
+        f(&mut ps, &mut ms);
+    }
+
+    fn close_refund(&mut self) {
+        self.closed = true;
+        let delta = -i64::from(self.reserved);
+        self.with_scopes(|ps, ms| {
+            ps.scope.adjust_tokens(delta);
+            ms.adjust_tokens(delta);
+        });
+    }
+
+    fn close_settle(&mut self, usage: Option<Usage>) {
+        self.closed = true;
+        let (reserved, est_in, out_chars, in_chars) = (
+            self.reserved,
+            self.est_in,
+            self.output_chars,
+            self.input_chars,
+        );
+        self.with_scopes(|ps, ms| {
+            let actual = match usage {
+                Some(u) => i64::from(u.prompt_tokens) + i64::from(u.completion_tokens),
+                None => i64::from(est_in) + (out_chars as f64 / ps.chars_per_token).ceil() as i64,
+            };
+            let delta = actual - i64::from(reserved);
+            ps.scope.adjust_tokens(delta);
+            ms.adjust_tokens(delta);
+            if let Some(u) = usage
+                && u.prompt_tokens > 0
+                && in_chars > 0
+            {
+                let observed = in_chars as f64 / f64::from(u.prompt_tokens);
+                let ema = (1.0 - EMA_ALPHA) * ps.chars_per_token + EMA_ALPHA * observed;
+                ps.chars_per_token = ema.clamp(CPT_MIN, CPT_MAX);
+            }
+        });
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if self.closed {
+            return;
+        }
+        if self.started {
+            self.close_settle(None);
+        } else {
+            self.close_refund();
+        }
+    }
+}
+
+/// `max_tokens` (ou `max_completion_tokens`) pedido pelo cliente.
+pub fn requested_max_tokens(request: &ChatCompletionRequest) -> Option<u32> {
+    request.max_tokens.or_else(|| {
+        request
+            .extra
+            .get("max_completion_tokens")
+            .and_then(serde_json::Value::as_u64)
+            .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+    })
+}
+
+/// `(chars de texto, nº de mensagens)`.
+fn request_text(request: &ChatCompletionRequest) -> (usize, usize) {
+    use crate::translate::openai::MessageContent;
+
+    let json_len =
+        |v: &serde_json::Value| serde_json::to_string(v).map_or(0, |s| s.chars().count());
+    let mut chars = 0;
+    for m in &request.messages {
+        match &m.content {
+            Some(MessageContent::Text(t)) => chars += t.chars().count(),
+            Some(MessageContent::Parts(parts)) => {
+                for part in parts {
+                    chars += part
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .map_or(NON_TEXT_PART_CHARS, |t| t.chars().count());
+                }
+            }
+            None => {}
+        }
+        if let Some(tc) = m.extra.get("tool_calls") {
+            chars += json_len(tc);
+        }
+    }
+    if let Some(tools) = request.extra.get("tools") {
+        chars += json_len(tools);
+    }
+    (chars, request.messages.len())
+}
+
+fn tokens_from(chars: usize, messages: usize, chars_per_token: f64) -> u32 {
+    let text = (chars as f64 / chars_per_token).ceil() as u64;
+    let overhead = messages as u64 * u64::from(TOKENS_PER_MESSAGE);
+    u32::try_from(text + overhead).unwrap_or(u32::MAX)
+}
+
+/// Estimativa heurística de tokens de entrada (sem `safety_factor`).
+pub fn estimate_tokens(request: &ChatCompletionRequest, chars_per_token: f64) -> u32 {
+    let (chars, messages) = request_text(request);
+    tokens_from(chars, messages, chars_per_token)
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests;
