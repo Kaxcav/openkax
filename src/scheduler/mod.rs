@@ -963,7 +963,6 @@ impl Scheduler {
         }
     }
 
-    /// Filtra e ordena os degraus elegíveis de `class_id`. Não debita nada.
     /// Chars/token do 1º candidato configurado de `class_id` (F1-5).
     /// Retorna `None` se a classe não existe.
     pub fn class_chars_per_token(&self, class_id: &str) -> Option<f64> {
@@ -980,6 +979,7 @@ impl Scheduler {
         Some(sh.default_cpt)
     }
 
+    /// Filtra e ordena os degraus elegíveis de `class_id`. Não debita nada.
     pub fn pick(&self, class_id: &str, request: &ChatCompletionRequest) -> Result<Pick, PickError> {
         self.pick_with(class_id, request, &PickOptions::default())
     }
