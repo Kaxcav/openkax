@@ -1,6 +1,6 @@
 //! Binário `openkax`.
 //!
-//! Uso: `openkax [serve]` (padrão) | `openkax mcp` (Fase 2).
+//! Uso: `openkax [serve]` (padrão) | `openkax mcp` (Fase 2) | `openkax doctor` (F5-1).
 //! Env: `OPENKAX_CONFIG` (default `./providers.toml`, recarregado ao mudar),
 //! `OPENKAX_BIND` (default `127.0.0.1:8000`), `OPENKAX_LOG` (filtro `tracing`,
 //! default `info`). Buckets persistem em `<state_dir>/buckets.json`.
@@ -36,8 +36,75 @@ fn main() -> ExitCode {
         None | Some("serve") => run_serve(),
         Some("mcp") => run_mcp(),
         Some("clean") => run_clean(),
+        Some("doctor") => run_doctor(),
         Some(other) => {
-            eprintln!("subcomando desconhecido: {other}\nuso: openkax [serve|mcp|clean]");
+            eprintln!("subcomando desconhecido: {other}\nuso: openkax [serve|mcp|clean|doctor]");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// `openkax doctor [--chat] [--provider <id>] [--json]`: exit ≠ 0 se algum
+/// provider habilitado der FAIL. Logs de `tracing` ficam em stderr.
+fn run_doctor() -> ExitCode {
+    let mut opts = openkax::doctor::Options::default();
+    let mut json = false;
+    let mut args = std::env::args().skip(2);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--chat" => opts.chat = true,
+            "--json" => json = true,
+            "--provider" => match args.next() {
+                Some(id) => opts.provider = Some(id),
+                None => {
+                    eprintln!("--provider exige um id");
+                    return ExitCode::from(2);
+                }
+            },
+            other => {
+                eprintln!(
+                    "argumento desconhecido: {other}\nuso: openkax doctor [--chat] [--provider <id>] [--json]"
+                );
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let path = PathBuf::from(
+        std::env::var_os("OPENKAX_CONFIG").unwrap_or_else(|| "providers.toml".into()),
+    );
+    let config = match Config::load(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let secrets = Secrets::from_env(&config);
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("falha ao criar runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match rt.block_on(openkax::doctor::run(&config, &secrets, &opts)) {
+        Ok(report) => {
+            if json {
+                println!("{}", report.to_json());
+            } else {
+                print!("{}", report.to_text());
+            }
+            if report.failed() {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(e) => {
+            eprintln!("{e}");
             ExitCode::from(2)
         }
     }

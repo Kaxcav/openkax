@@ -284,6 +284,13 @@
       "owner": "lead",
       "status": "done",
       "note": "Só documentação (sem mudança de código). Aceite manual do Kaxcav (>=7/10 em 1a passada) pendente: needs_user; a secao Fase atual do CLAUDE.md nao foi alterada. Pendencia de decisao: persistencia dos lotes (hoje so em memoria) e ligacao de verify.toml por glob ao runner"
+    },
+    {
+      "id": "F5-1",
+      "title": "openkax doctor em Rust (catálogo, --chat, --provider, --json)",
+      "owner": "lead",
+      "status": "done",
+      "note": "src/doctor.rs + despacho em main.rs. 9 testes wiremock em tests/doctor_catalog.rs (JSON ok, text/plain FAIL, 401/403 FAIL, upstream ausente WARN, Cloudflare /ai/models/search, headers x-ratelimit/IETF + TTFT, chat FAIL, filtro/JSON sem vazar chave, chave ausente). 130 unitários + demais suítes verdes. Não rodado contra provider real; doctor.sh/doctor.ps1 mantidos (substituição gradual)"
     }
   ]
 }
