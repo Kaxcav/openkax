@@ -33,13 +33,17 @@ IDs conferidos em `/models` em 2026-11-02 (Cohere pela API nativa `/v1/models`; 
 
 ### Rotas (free → credit → paid, validado no parse)
 
+Revisadas em F0-20 (2026-11-02), depois do smoke F0-14:
+
 | Classe | Rota |
 |---|---|
-| `kax/coder-fast` | groq → zai(glm-4.7-flash) → sambanova(deepseek-v3.1 → llama-3.3-70b → gpt-oss-120b) → nvidia(minimax) → gemini-flash-lite → vercel → deepseek |
-| `kax/coder-smart` | gemini-flash → nvidia(kimi) → mistral(codestral) → zai(glm-4.7-flash) → github → sambanova(deepseek-v3.1) → openrouter → vercel → deepseek |
-| `kax/reviewer` | mistral → cohere → zai → nvidia(deepseek-v4.1-flash) → gemini → deepseek |
-| `kax/summarizer` | gemini-flash-lite → gemini-flash → cloudflare → openrouter → vercel |
-| `kax/cheap-long` | gemini-flash → mistral → nvidia(minimax) — `max_ctx` do pacote filtra |
+| `kax/coder-fast` | groq(qwen-coder) → mistral(codestral) → zai(glm-4.7-flash) → sambanova(deepseek-v3.1 → llama-3.3-70b → gpt-oss-120b) → nvidia(minimax-m3.1-flash) → gemini-flash-lite → vercel(nemotron) → deepseek-flash |
+| `kax/coder-smart` | mistral(codestral) → gemini-flash → nvidia(minimax-m3.1-flash) → zai(glm-4.7-flash) → github(github-mini) → sambanova(deepseek-v3.1) → openrouter(north-mini-code) → vercel(ling) → deepseek-flash |
+| `kax/reviewer` | mistral(codestral) → cohere(command-a) → zai → nvidia(deepseek-v4.1-flash) → gemini-flash → deepseek-pro — `x-openkax-exclude-family` garante revisor de família diferente do autor |
+| `kax/summarizer` | gemini-flash-lite → gemini-flash → cloudflare → openrouter(gemma-4-31b) → vercel |
+| `kax/cheap-long` | gemini-flash → mistral(codestral) → nvidia(minimax) — `max_ctx` do pacote filtra |
+
+Mudanças em relação à rota original: codestral entra na frente do `coder-smart` (o `gemini-flash` pensa sem mandar deltas e estourava o 1º token; ver F0-18) e como 2º degrau do `coder-fast`; o `nvidia(kimi)` saiu (404 no smoke).
 
 ### Requisitos novos
 
@@ -64,6 +68,10 @@ IDs conferidos em `/models` em 2026-11-02 (Cohere pela API nativa `/v1/models`; 
   - É o hook para o `kax/reviewer` de família diferente na Fase 2.
 - **N6 — mensais**: `requests_per_month`/`tokens_per_month` são só informativos até o snapshot da F0-10; o pacing é via `rpd`.
 - **Headers de saldo**: `quirks.ratelimit_headers = { rpm?, tpm?, rpd?, tpd? }` mapeia nomes de header → bucket. O valor corrige o escopo dono do limite (modelo antes do provider), em sucesso e em erro.
+- **Teto de tier** (F0-14, aprovado na F0-20): header de request `x-openkax-max-tier: free|credit|paid`.
+  - Degraus de tier acima do teto viram `Skip::Excluded` (não entram no `Retry-After`); valor inválido → 400.
+  - É o jeito de o lead (e o smoke) rodarem classes sem tocar crédito nem dinheiro: com `free`, uma classe só esgotada em free devolve 429 em vez de cair em Vercel/DeepSeek.
+- **chars/token por modelo** (F0-20): a EMA que recalibra a estimativa a cada `usage` vive no escopo do **modelo** (um provider como a NVIDIA serve tokenizers diferentes). `/quota` expõe `providers[].models[].chars_per_token`; o provider não tem mais esse campo.
 - **Pin de depuração** (F0-14): `x-openkax-pin: provider/modelo`.
   - Fixa o candidato, até fora da rota, mas passa por gate, reserva e ledger.
   - Modelo desabilitado → 409 com o motivo.

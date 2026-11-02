@@ -350,8 +350,31 @@ fn settle_recalibrates_chars_per_token_ema() {
         total_tokens: 251,
     }));
     // observado 4.0; EMA 0.8·1.0 + 0.2·4.0 = 1.6
-    let cpt = f.snap_provider("p").chars_per_token;
+    let cpt = f.snap_model("p", "m").chars_per_token;
     assert!((cpt - 1.6).abs() < 1e-9, "{cpt}");
+}
+
+/// F0-20: chars/token é do MODELO (tokenizers diferentes no mesmo provider):
+/// recalibrar um não muda a estimativa do irmão.
+#[test]
+fn chars_per_token_is_calibrated_per_model() {
+    let f = fx(SIBLINGS);
+    let p = f.pick(&req(1004));
+    assert_eq!(p.candidates[0].est_tokens, 1004);
+    f.s.reserve(&p.candidates[0]).unwrap().settle(Some(Usage {
+        prompt_tokens: 250,
+        completion_tokens: 1,
+        total_tokens: 251,
+    }));
+    let flash = f.snap_model("gemini", "gemini-flash").chars_per_token;
+    let lite = f.snap_model("gemini", "gemini-flash-lite").chars_per_token;
+    assert!((flash - 1.6).abs() < 1e-9, "{flash}");
+    assert!((lite - 1.0).abs() < 1e-9, "{lite}");
+
+    let p = f.pick(&req(1004));
+    // 1000 chars / 1.6 = 625 + 4 de overhead
+    assert_eq!(p.candidates[0].est_tokens, 629);
+    assert_eq!(p.candidates[1].est_tokens, 1004);
 }
 
 /// A2: drop antes do 1º token devolve tokens; a request continua contada.

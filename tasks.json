@@ -120,6 +120,12 @@
       "title": "Cohere: command-a-plus → command-a-03-2025 (sem raciocínio) + quirk ascii_json (UTF-8 cru degenerava); segue no kax/reviewer",
       "owner": "lead",
       "status": "done"
+    },
+    {
+      "id": "F0-20",
+      "title": "Rotas revisadas (codestral à frente do coder-smart e 2º no coder-fast); chars_per_token por modelo; x-openkax-max-tier no ADR 0004",
+      "owner": "lead",
+      "status": "done"
     }
   ]
 }

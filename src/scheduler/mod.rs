@@ -220,7 +220,6 @@ pub struct ProviderQuota {
     pub missing_env: Vec<String>,
     pub in_flight: u32,
     pub state: StateView,
-    pub chars_per_token: f64,
     pub rpm_remaining: Option<i64>,
     pub tpm_remaining: Option<i64>,
     pub rpd_remaining: Option<i64>,
@@ -237,6 +236,8 @@ pub struct ModelQuota {
     pub request_faults: u64,
     pub family: Option<String>,
     pub in_flight: u32,
+    /// Recalibrado por EMA a cada `usage` deste modelo (F0-20).
+    pub chars_per_token: f64,
     pub rpm_remaining: Option<i64>,
     pub tpm_remaining: Option<i64>,
     pub rpd_remaining: Option<i64>,
@@ -287,11 +288,13 @@ struct ProviderRt {
     tpm_counts_max_tokens: bool,
     max_tokens_cap: Option<u32>,
     /// Lock 1 (sempre antes do lock do modelo).
-    state: Mutex<ProviderScope>,
+    state: Mutex<Scope>,
     models: Vec<ModelRt>,
 }
 
-struct ProviderScope {
+/// Escopo do modelo + calibração de chars/token, que é do tokenizer do
+/// modelo e não do provider (F0-20).
+struct ModelScope {
     scope: Scope,
     chars_per_token: f64,
 }
@@ -304,7 +307,7 @@ struct ModelRt {
     /// Tem `limits` próprios → 429 cai neste escopo.
     own_limits: bool,
     /// Lock 2.
-    scope: Mutex<Scope>,
+    scope: Mutex<ModelScope>,
 }
 
 /// Medidas da request independentes do provider.
@@ -655,12 +658,10 @@ impl Scheduler {
                         upstream: m.upstream.as_deref().map(Into::into),
                         max_ctx: m.max_ctx.or(p.limits.max_ctx),
                         own_limits: m.limits.is_some(),
-                        scope: Mutex::new(Scope::new(
-                            m.limits.as_ref(),
-                            d.daily_reset_utc,
-                            now,
-                            utc,
-                        )),
+                        scope: Mutex::new(ModelScope {
+                            scope: Scope::new(m.limits.as_ref(), d.daily_reset_utc, now, utc),
+                            chars_per_token: d.estimate_chars_per_token,
+                        }),
                     })
                     .collect();
                 ProviderRt {
@@ -671,10 +672,7 @@ impl Scheduler {
                     safety: p.safety_factor.unwrap_or(d.safety_factor),
                     tpm_counts_max_tokens: p.quirks.tpm_counts_max_tokens,
                     max_tokens_cap: p.quirks.max_tokens_cap,
-                    state: Mutex::new(ProviderScope {
-                        scope,
-                        chars_per_token: d.estimate_chars_per_token,
-                    }),
+                    state: Mutex::new(scope),
                     models,
                 }
             })
@@ -826,17 +824,17 @@ impl Scheduler {
         let p = &sh.providers[pi];
         let m = &p.models[mi];
         let mut ps = lock(&p.state);
-        ps.scope.tick(now, utc);
-        let tokens = (f64::from(tokens_from(est.chars, est.messages, ps.chars_per_token))
+        let mut ms = lock(&m.scope);
+        ps.tick(now, utc);
+        ms.scope.tick(now, utc);
+        let tokens = (f64::from(tokens_from(est.chars, est.messages, ms.chars_per_token))
             * p.safety)
             .ceil() as u32;
         let (out_reserve, max_tokens_override) = p.output_plan(est.requested_out);
         let reserve_tokens = tokens.saturating_add(out_reserve);
-        let mut ms = lock(&m.scope);
-        ms.tick(now, utc);
         let mut verdict = combine(
-            ps.scope.gate(reserve_tokens, now, utc),
-            ms.gate(reserve_tokens, now, utc),
+            ps.gate(reserve_tokens, now, utc),
+            ms.scope.gate(reserve_tokens, now, utc),
         );
         if verdict.is_ok() && m.max_ctx.is_some_and(|ctx| tokens > ctx) {
             verdict = Err(Skip::NeverFits);
@@ -873,9 +871,9 @@ impl Scheduler {
         {
             let mut ps = lock(&p.state);
             let mut ms = lock(&m.scope);
-            ps.scope.tick(now, utc);
-            ms.tick(now, utc);
-            match combine(ps.scope.gate(tokens, now, utc), ms.gate(tokens, now, utc)) {
+            ps.tick(now, utc);
+            ms.scope.tick(now, utc);
+            match combine(ps.gate(tokens, now, utc), ms.scope.gate(tokens, now, utc)) {
                 Ok(()) => {}
                 Err(Skip::NotNow { ready_in } | Skip::Cooldown { ready_in }) => {
                     return Err(NotNow { ready_in });
@@ -886,7 +884,7 @@ impl Scheduler {
                     });
                 }
             }
-            for s in [&mut ps.scope, &mut *ms] {
+            for s in [&mut ps, &mut ms.scope] {
                 s.charge_request();
                 s.adjust_tokens(i64::from(tokens));
             }
@@ -909,8 +907,8 @@ impl Scheduler {
         let p = sh.providers.iter().find(|p| &*p.id == provider_id)?;
         let now = sh.clock.now();
         let mut ps = lock(&p.state);
-        ps.scope.tick(now, utc_secs(sh.clock.utc_now()));
-        Some(ps.scope.state(now))
+        ps.tick(now, utc_secs(sh.clock.utc_now()));
+        Some(ps.state(now))
     }
 
     pub fn model_state(&self, provider_id: &str, model_id: &str) -> Option<ProviderState> {
@@ -919,8 +917,8 @@ impl Scheduler {
         let m = p.models.iter().find(|m| &*m.id == model_id)?;
         let now = sh.clock.now();
         let mut ms = lock(&m.scope);
-        ms.tick(now, utc_secs(sh.clock.utc_now()));
-        Some(ms.state(now))
+        ms.scope.tick(now, utc_secs(sh.clock.utc_now()));
+        Some(ms.scope.state(now))
     }
 
     pub fn snapshot(&self) -> QuotaSnapshot {
@@ -931,30 +929,26 @@ impl Scheduler {
             .providers
             .iter()
             .map(|p| {
-                let (state, cpt, [rpm, tpm, rpd, tpd], in_flight) = {
+                let (state, [rpm, tpm, rpd, tpd], in_flight) = {
                     let mut ps = lock(&p.state);
-                    ps.scope.tick(now, utc);
-                    (
-                        ps.scope.view(now),
-                        ps.chars_per_token,
-                        ps.scope.remaining(),
-                        ps.scope.in_flight,
-                    )
+                    ps.tick(now, utc);
+                    (ps.view(now), ps.remaining(), ps.in_flight)
                 };
                 let models = p
                     .models
                     .iter()
                     .map(|m| {
                         let mut ms = lock(&m.scope);
-                        ms.tick(now, utc);
-                        let [rpm, tpm, rpd, tpd] = ms.remaining();
+                        ms.scope.tick(now, utc);
+                        let [rpm, tpm, rpd, tpd] = ms.scope.remaining();
                         ModelQuota {
                             id: m.id.to_string(),
                             family: m.family.clone(),
-                            in_flight: ms.in_flight,
+                            in_flight: ms.scope.in_flight,
+                            chars_per_token: ms.chars_per_token,
                             upstream: m.upstream.as_deref().map(str::to_owned),
-                            state: ms.view(now),
-                            request_faults: ms.request_faults,
+                            state: ms.scope.view(now),
+                            request_faults: ms.scope.request_faults,
                             rpm_remaining: rpm,
                             tpm_remaining: tpm,
                             rpd_remaining: rpd,
@@ -968,7 +962,6 @@ impl Scheduler {
                     missing_env: p.missing_env.clone(),
                     in_flight,
                     state,
-                    chars_per_token: cpt,
                     rpm_remaining: rpm,
                     tpm_remaining: tpm,
                     rpd_remaining: rpd,
@@ -1047,8 +1040,8 @@ impl Reservation {
             return;
         }
         self.with_scopes(|ps, ms| {
-            let left = ms.apply_remaining(*r);
-            ps.scope.apply_remaining(left);
+            let left = ms.scope.apply_remaining(*r);
+            ps.apply_remaining(left);
         });
     }
 
@@ -1067,7 +1060,7 @@ impl Reservation {
             let p = &self.shared.providers[self.provider_idx];
             let d = Duration::from_secs(p.cooldown.on_5xx_s).max(MIN_COOLDOWN);
             let now = self.shared.clock.now();
-            lock(&p.models[self.model_idx].scope).cool(now, d);
+            lock(&p.models[self.model_idx].scope).scope.cool(now, d);
             return Some(d);
         }
         self.close_refund();
@@ -1083,8 +1076,8 @@ impl Reservation {
         let cd = &p.cooldown;
         let mut ps = lock(&p.state);
         let mut ms = lock(&m.scope);
-        ps.scope.tick(now, utc);
-        ms.tick(now, utc);
+        ps.tick(now, utc);
+        ms.scope.tick(now, utc);
 
         // F0-17: o escopo do cooldown segue o tipo do erro. Conta/conexão
         // (auth, rede) → provider; o modelo que falhou (5xx, protocolo,
@@ -1096,19 +1089,19 @@ impl Reservation {
         };
         match error {
             UpstreamError::RequestFault { .. } => {
-                ms.request_faults += 1;
+                ms.scope.request_faults += 1;
                 None
             }
             UpstreamError::Auth { .. } => {
-                ps.scope.disabled = Some(DisabledReason::AuthRejected);
+                ps.disabled = Some(DisabledReason::AuthRejected);
                 None
             }
             UpstreamError::NotFound { .. } => {
-                ms.disabled = Some(DisabledReason::ModelNotFound);
+                ms.scope.disabled = Some(DisabledReason::ModelNotFound);
                 None
             }
             UpstreamError::RateLimited { retry_after, daily } => {
-                let target: &mut Scope = if m.own_limits { &mut ms } else { &mut ps.scope };
+                let target: &mut Scope = if m.own_limits { &mut ms.scope } else { &mut ps };
                 target.drain_rpm();
                 let to_reset = target.secs_to_reset(utc);
                 let d = if *daily || target.daily_exhausted() {
@@ -1127,18 +1120,18 @@ impl Reservation {
                 target.cool(now, d);
                 Some(d)
             }
-            UpstreamError::Network(_) => cool(cd.on_timeout_s, &mut ps.scope),
+            UpstreamError::Network(_) => cool(cd.on_timeout_s, &mut ps),
             UpstreamError::Server { .. }
             | UpstreamError::Protocol(_)
-            | UpstreamError::MidStream(_) => cool(cd.on_5xx_s, &mut ms),
+            | UpstreamError::MidStream(_) => cool(cd.on_5xx_s, &mut ms.scope),
             UpstreamError::FirstTokenTimeout | UpstreamError::RequestTimeout => {
-                cool(cd.on_timeout_s, &mut ms)
+                cool(cd.on_timeout_s, &mut ms.scope)
             }
-            UpstreamError::OtherClient { .. } => cool(cd.on_4xx_other_s, &mut ms),
+            UpstreamError::OtherClient { .. } => cool(cd.on_4xx_other_s, &mut ms.scope),
         }
     }
 
-    fn with_scopes(&self, f: impl FnOnce(&mut ProviderScope, &mut Scope)) {
+    fn with_scopes(&self, f: impl FnOnce(&mut Scope, &mut ModelScope)) {
         let sh = &*self.shared;
         let p = &sh.providers[self.provider_idx];
         let m = &p.models[self.model_idx];
@@ -1146,8 +1139,8 @@ impl Reservation {
         let utc = utc_secs(sh.clock.utc_now());
         let mut ps = lock(&p.state);
         let mut ms = lock(&m.scope);
-        ps.scope.tick(now, utc);
-        ms.tick(now, utc);
+        ps.tick(now, utc);
+        ms.scope.tick(now, utc);
         f(&mut ps, &mut ms);
     }
 
@@ -1155,10 +1148,10 @@ impl Reservation {
         self.closed = true;
         let delta = -i64::from(self.reserved);
         self.with_scopes(|ps, ms| {
-            ps.scope.in_flight = ps.scope.in_flight.saturating_sub(1);
-            ms.in_flight = ms.in_flight.saturating_sub(1);
-            ps.scope.adjust_tokens(delta);
-            ms.adjust_tokens(delta);
+            ps.in_flight = ps.in_flight.saturating_sub(1);
+            ms.scope.in_flight = ms.scope.in_flight.saturating_sub(1);
+            ps.adjust_tokens(delta);
+            ms.scope.adjust_tokens(delta);
         });
     }
 
@@ -1171,22 +1164,22 @@ impl Reservation {
             self.input_chars,
         );
         self.with_scopes(|ps, ms| {
-            ps.scope.in_flight = ps.scope.in_flight.saturating_sub(1);
-            ms.in_flight = ms.in_flight.saturating_sub(1);
+            ps.in_flight = ps.in_flight.saturating_sub(1);
+            ms.scope.in_flight = ms.scope.in_flight.saturating_sub(1);
             let actual = match usage {
                 Some(u) => i64::from(u.prompt_tokens) + i64::from(u.completion_tokens),
-                None => i64::from(est_in) + (out_chars as f64 / ps.chars_per_token).ceil() as i64,
+                None => i64::from(est_in) + (out_chars as f64 / ms.chars_per_token).ceil() as i64,
             };
             let delta = actual - i64::from(reserved);
-            ps.scope.adjust_tokens(delta);
-            ms.adjust_tokens(delta);
+            ps.adjust_tokens(delta);
+            ms.scope.adjust_tokens(delta);
             if let Some(u) = usage
                 && u.prompt_tokens > 0
                 && in_chars > 0
             {
                 let observed = in_chars as f64 / f64::from(u.prompt_tokens);
-                let ema = (1.0 - EMA_ALPHA) * ps.chars_per_token + EMA_ALPHA * observed;
-                ps.chars_per_token = ema.clamp(CPT_MIN, CPT_MAX);
+                let ema = (1.0 - EMA_ALPHA) * ms.chars_per_token + EMA_ALPHA * observed;
+                ms.chars_per_token = ema.clamp(CPT_MIN, CPT_MAX);
             }
         });
     }

@@ -13,7 +13,7 @@
 [defaults]
 request_timeout_ms = 60000
 first_token_timeout_ms = 8000
-estimate_chars_per_token = 3.6     # recalibrado por provider via `usage`
+estimate_chars_per_token = 3.6     # chute inicial; recalibrado por MODELO via `usage` (F0-20)
 safety_factor = 1.0
 daily_reset_utc = "00:00"          # reset de RPD/TPD quando o escopo não define `limits.reset_utc`
 
@@ -193,6 +193,7 @@ id = "kax/coder-fast"
 max_packet_tokens = 6000
 route = [
   { provider = "groq", model = "qwen-coder" },
+  { provider = "mistral", model = "codestral" },
   { provider = "zai", model = "glm-4.7-flash" },
   { provider = "sambanova", model = "deepseek-v3.1" },
   { provider = "sambanova", model = "llama-3.3-70b" },
@@ -207,10 +208,12 @@ route = [
 id = "kax/coder-smart"
 max_packet_tokens = 60000
 # Haiku (pago) como degrau explícito entra na Fase 1, junto com o translator.
+# F0-20: codestral na frente (125 RPM, 1º token rápido no smoke); gemini-flash
+# (thinking, 1º token lento) passa a 2º.
 route = [
+  { provider = "mistral", model = "codestral" },
   { provider = "gemini", model = "gemini-flash" },
   { provider = "nvidia", model = "minimax-m3.1-flash" },
-  { provider = "mistral", model = "codestral" },
   { provider = "zai", model = "glm-4.7-flash" },
   { provider = "github", model = "github-mini" },
   { provider = "sambanova", model = "deepseek-v3.1" },

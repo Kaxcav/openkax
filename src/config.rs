@@ -40,7 +40,7 @@ pub struct Defaults {
     /// Teto estendido quando o upstream manda deltas de raciocínio antes do
     /// conteúdo (sinal de vida, não commit) — N4.
     pub first_token_timeout_reasoning_ms: u64,
-    /// Chute inicial de chars/token (recalibrado por provider via `usage`).
+    /// Chute inicial de chars/token (recalibrado por modelo via `usage`, F0-20).
     pub estimate_chars_per_token: f64,
     /// Multiplicador sobre a estimativa de tokens antes de checar buckets.
     pub safety_factor: f64,
@@ -801,29 +801,73 @@ mod tests {
         ] {
             assert!(c.class(id).is_some(), "classe {id} ausente");
         }
-        let fast = c.class("kax/coder-fast").unwrap();
-        assert_eq!(fast.max_packet_tokens, 6000);
-        assert_eq!(fast.route[0].provider, "groq");
+        assert_eq!(c.class("kax/coder-fast").unwrap().max_packet_tokens, 6000);
 
-        let smart: Vec<_> = c
-            .class("kax/coder-smart")
-            .unwrap()
-            .route
-            .iter()
-            .map(|s| s.provider.as_str())
-            .collect();
+        // F0-20: rotas por classe, `provider/modelo` na ordem de fallback.
+        let route = |id: &str| -> Vec<String> {
+            c.class(id)
+                .unwrap()
+                .route
+                .iter()
+                .map(|s| format!("{}/{}", s.provider, s.model))
+                .collect()
+        };
         assert_eq!(
-            smart,
+            route("kax/coder-smart"),
             [
-                "gemini",
-                "nvidia",
-                "mistral",
-                "zai",
-                "github",
-                "sambanova",
-                "openrouter",
-                "vercel",
-                "deepseek"
+                "mistral/codestral",
+                "gemini/gemini-flash",
+                "nvidia/minimax-m3.1-flash",
+                "zai/glm-4.7-flash",
+                "github/github-mini",
+                "sambanova/deepseek-v3.1",
+                "openrouter/north-mini-code",
+                "vercel/ling-3.1-flash",
+                "deepseek/deepseek-flash",
+            ]
+        );
+        assert_eq!(
+            route("kax/coder-fast"),
+            [
+                "groq/qwen-coder",
+                "mistral/codestral",
+                "zai/glm-4.7-flash",
+                "sambanova/deepseek-v3.1",
+                "sambanova/llama-3.3-70b",
+                "sambanova/gpt-oss-120b",
+                "nvidia/minimax-m3.1-flash",
+                "gemini/gemini-flash-lite",
+                "vercel/nemotron-3.5-lightning-free",
+                "deepseek/deepseek-flash",
+            ]
+        );
+        assert_eq!(
+            route("kax/reviewer"),
+            [
+                "mistral/codestral",
+                "cohere/command-a",
+                "zai/glm-4.7-flash",
+                "nvidia/deepseek-v4.1-flash",
+                "gemini/gemini-flash",
+                "deepseek/deepseek-pro",
+            ]
+        );
+        assert_eq!(
+            route("kax/summarizer"),
+            [
+                "gemini/gemini-flash-lite",
+                "gemini/gemini-flash",
+                "cloudflare/llama-3.3-70b",
+                "openrouter/gemma-4-31b",
+                "vercel/nemotron-3.5-lightning-free",
+            ]
+        );
+        assert_eq!(
+            route("kax/cheap-long"),
+            [
+                "gemini/gemini-flash",
+                "mistral/codestral",
+                "nvidia/minimax-m3.1-flash",
             ]
         );
     }
