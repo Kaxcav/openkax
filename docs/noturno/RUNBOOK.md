@@ -20,29 +20,36 @@ git fetch origin
 git merge-base --is-ancestor origin/fase-0 origin/main && echo LIBERADO || echo AGUARDANDO
 ```
 - **AGUARDANDO** (o PR #1 `fase-0 → main` ainda não foi mergeado — depende do aceite Continue/Cline do Kaxcav): **não comece a Fase 1 e não faça commit em lugar nenhum** (commits na `fase-0` poluiriam o PR e disparariam CI à toa). Encerre informando "aguardando merge do PR #1". Não há outra tarefa permitida nesse estado.
-- **LIBERADO**: trabalhe na branch `fase-1` (crie a partir de `origin/main` se não existir; se existir, faça checkout e `git merge --ff-only origin/fase-1`).
+- **LIBERADO**: a branch de trabalho é `fase-2` se ela existir no remoto; senão `fase-1` (crie a partir de `origin/main` se não existir). Faça checkout dela e `git merge --ff-only origin/<branch>`.
 
 ## Trava contra execuções sobrepostas
-No início, depois do portão, leia a última entrada de `docs/noturno/LOG.md` na `fase-1`. Se ela diz `EM ANDAMENTO` com início há menos de 75 min, **encerre sem fazer nada**. Senão, adicione uma entrada `EM ANDAMENTO <hora> — <tarefa>`, commit (`chore(noturno): inicia <tarefa>`) e push. Se o push for rejeitado (outra execução pegou), encerre.
+No início, depois do portão, leia a última entrada de `docs/noturno/LOG.md` na branch de trabalho. Se ela diz `EM ANDAMENTO` com início há menos de 75 min, **encerre sem fazer nada**. Senão, adicione uma entrada `EM ANDAMENTO <hora> — <tarefa>`, commit (`chore(noturno): inicia <tarefa>`) e push. Se o push for rejeitado (outra execução pegou), encerre.
 
 ## Ciclo por execução
 1. Portão → trava.
-2. Ler `PLANO_MESTRE.md` §3.5 e §4 (Fase 1), `CLAUDE.md`, ADRs relevantes e `tasks.json`.
-3. Escolher a primeira tarefa `F1-*` com status `todo` cujas dependências estão `done`.
+2. Ler `PLANO_MESTRE.md` (§3.5 para a Fase 1, §3.6 para a Fase 2, §3.7 para o report, §4), `CLAUDE.md`, ADRs relevantes e `tasks.json`.
+3. Escolher a primeira tarefa do backlog, na ordem F0-24 → F1-* → F2-* → F5-*, com status `todo` cujas dependências estão `done`.
 4. TDD: testes primeiro (devem falhar), implementação, `cargo test`, `cargo clippy -D warnings`.
 5. **Revisão independente:** suba um subagente sem contexto desta conversa, entregue o diff (`git diff origin/fase-1...HEAD`) e o trecho do PLANO/ADR que ele deve honrar, e peça defeitos concretos. Corrija o que for confirmado; registre no LOG o que foi descartado e por quê.
-6. Commit(s) `tipo(escopo): resumo`, push na `fase-1`.
-7. PR `fase-1 → main` em **draft** (crie se não existir via `gh api repos/Kaxcav/openkax/pulls -f head=fase-1 -f base=main -F draft=true ...`; GraphQL não funciona, use REST). Atualize o checklist do corpo.
-8. Confira o CI do push (`gh api repos/Kaxcav/openkax/actions/runs?branch=fase-1&per_page=1`). Se a execução acabar antes do CI, a próxima confere primeiro.
+6. Commit(s) `tipo(escopo): resumo`, push na branch de trabalho.
+7. PR em **draft** (`fase-1 → main`; `fase-2 → fase-1`) (crie se não existir via `gh api repos/Kaxcav/openkax/pulls -f head=fase-1 -f base=main -F draft=true ...`; GraphQL não funciona, use REST). Atualize o checklist do corpo.
+8. Confira o CI do push (`gh api "repos/Kaxcav/openkax/actions/runs?branch=<branch>&per_page=1"`). Se a execução acabar antes do CI, a próxima confere primeiro.
 9. `tasks.json`: status da tarefa, nota com números. `LOG.md`: troque `EM ANDAMENTO` por `FEITO`/`BLOQUEADO` com resumo de 3–6 linhas (o que entrou, testes, CI, pendências).
 
 ## Parada
 - CI vermelho: a próxima execução só corrige o CI. **Duas execuções seguidas sem conseguir deixar o CI verde → BLOQUEADO**, não comece tarefa nova; registre causa e hipótese.
 - Ambiguidade de spec que muda contrato público → `needs_user`, pule para a próxima tarefa independente; se não houver, encerre.
-- Todas as `F1-*` feitas e CI verde → escreva `docs/smoke/fase-1-aceite.md` (roteiro para o Kaxcav, ver F1-8) e encerre as execuções seguintes com "Fase 1 pronta para aceite". **Não inicie a Fase 2** sem aceite humano da Fase 1.
+- **Decisão do Kaxcav (2026-11-02 15:11): o turno roda sem aceite humano intermediário.** Ordem do backlog: F0-24 → F1-1..F1-8 → F2-1..F2-7 → F5-1..F5-2. Ao terminar a Fase 1 (F1-8 feito, CI verde), siga direto para a Fase 2 numa branch `fase-2` criada a partir da `fase-1` (empilhada; PR draft `fase-2 → fase-1`). Aceites manuais (clientes reais, providers reais) ficam documentados em `docs/smoke/` para depois — nunca são pré-requisito do turno.
+- Tudo feito e CI verde → registre "backlog do turno concluído" no LOG e encerre as execuções seguintes sem trabalhar.
+
+## Fechamento da Fase 0 (primeira tarefa após o portão)
+
+| ID | Entrega | Aceite |
+|---|---|---|
+| F0-24 compat de clientes | Substitui o aceite manual Continue/Cline como critério bloqueante (decisão do Kaxcav 2026-11-02; o manual vira opcional). Testes de integração (wiremock) que reproduzem os formatos de request reais dos clientes, montados a partir do código-fonte público deles: **Continue** (chat stream, `stream_options`, mensagens com `system` + histórico, edit/apply) e **Cline** (OpenAI Compatible: system prompt grande > 6k tokens com `tools`/`tool_choice`, várias rodadas de `tool_calls` → mensagens `tool`, stream). Cada teste valida: classe certa, stream SSE bem formado e terminado em `[DONE]`, tool_calls com índices/argumentos reconstruídos, 413 para `kax/coder-fast` com o prompt do Cline, fallback pré-1º-token no meio de uma sessão multi-rodada, `/quota` e ledger coerentes. Registre a mudança de critério no ADR 0004 e no PLANO §4 Fase 0. Esta tarefa roda na branch `fase-1`. | suíte verde no CI (Linux e Windows) |
 
 ## Tarefas da Fase 1 (ponte Anthropic) — ver PLANO §3.5
-Registre-as no `tasks.json` na primeira execução liberada (owner `lead`, status `todo`).
+Registre F0-24, F1-*, F2-* e F5-* no `tasks.json` na primeira execução liberada (owner `lead`, status `todo`).
 
 | ID | Depende | Entrega | Aceite |
 |---|---|---|---|
@@ -54,6 +61,26 @@ Registre-as no `tasks.json` na primeira execução liberada (owner `lead`, statu
 | F1-6 passthrough | F1-1 | modelos `claude-*` → provider `anthropic` (`native = "anthropic"`): proxy byte a byte de request e resposta/stream, **todos** os headers do cliente repassados (inclui `authorization`, `x-api-key`, `anthropic-version`, `anthropic-beta`), hop-by-hop removidos; `base_url` do TOML (permite wiremock); ledger só com metadados (status, latência, modelo) — **nunca** corpo nem auth; sem scheduler/quota | wiremock confere corpo idêntico, headers idênticos e stream repassado sem reempacotar; teste garante que o ledger não contém o corpo |
 | F1-7 aliases (Modo A) | F1-4 | seção opcional `[aliases]` no TOML (`"claude-haiku-*" = "kax/summarizer"`, glob simples) aplicada antes do roteamento; sem alias, `claude-*` vai para passthrough; default do TOML **sem** aliases | testes: alias casa → classe; sem alias → passthrough |
 | F1-8 docs | F1-4..F1-7 | ADR 0006 Aceito; README/CLAUDE.md com uso (`ANTHROPIC_BASE_URL=http://localhost:8000`, `ANTHROPIC_DEFAULT_HAIKU_MODEL=kax/summarizer`); `docs/smoke/fase-1-aceite.md` com o roteiro manual do PLANO §4 Fase 1 (Claude Code normal em Sonnet/Opus via passthrough; Explore em `kax/summarizer` com Read/Grep/Glob em ≥ 8/10) | revisão independente da doc contra o código |
+
+## Tarefas da Fase 2 (MCP `kax-workers`) — ver PLANO §3.6 e §4 Fase 2
+Mesmas regras (CONTRACT primeiro, TDD, sem provider real: operários respondem via wiremock com diffs fixos).
+
+| ID | Depende | Entrega |
+|---|---|---|
+| F2-1 CONTRACT | F1-8 | subcomando `openkax mcp` (stdio, `rmcp`); schemas das tools `delegate`, `delegate_batch`, `status`, `quota`, `report` conforme §3.6; tipos `TaskPacket`, `TaskResult`; `.kax/verify.toml` (schema); ADR 0007 |
+| F2-2 worktree | F2-1 | `git worktree add .kax/wt/<id> <base_ref>` por tarefa, limpeza (`openkax clean`), isolamento: nada roda fora do worktree; testes com repo git temporário |
+| F2-3 pacote | F2-1 | montagem do pacote enxuto (system curto de operário + arquivos `read` + contratos + restrições + formato `unified_diff`), estimativa de tokens contra `max_packet_tokens` da classe |
+| F2-4 aplicar+verify | F2-2, F2-3 | aplicar diff no worktree, rodar `accept.verify` com timeout do `verify.toml`, capturar log truncado (4k) |
+| F2-5 retry | F2-4 | falhou → attempt 2 no **próximo** candidato da classe com stderr anexado; resultado `{id,status: accepted\|rejected\|needs_lead, provider, attempts, diff, verify_log, tokens, latency_ms}`; aceito vira branch `kax/<id>` |
+| F2-6 batch | F2-5 | `delegate_batch` com `parallelism` (semáforo), `status(batch_id)`, `quota()`; ledger `kind:"task"`; medir memória privada numa rajada de 8 tarefas paralelas (mocks) e registrar |
+| F2-7 docs | F2-6 | ADR 0007 Aceito; `docs/smoke/fase-2-aceite.md` (roteiro manual: Claude Code despacha 10 tarefas reais, ≥7 aceitas); exemplo de `.kax/verify.toml` |
+
+## Fase 5 parcial (testável sem provider real) — só depois da F2-7
+
+| ID | Entrega |
+|---|---|
+| F5-1 doctor | `openkax doctor` em Rust: lê `providers.toml` + env (só nomes), testa cada provider com `/models` e chat mínimo, imprime headers de limite; testes com wiremock. Substitui gradualmente `doctor.sh`/`doctor.ps1` |
+| F5-2 report | `openkax report --week` a partir do ledger JSONL (§3.7): aceitação por classe/provider, latência p50/p95, tokens por classe, quedas em credit/paid; testes com ledger fixture |
 
 ## Formato do LOG.md
 ```
