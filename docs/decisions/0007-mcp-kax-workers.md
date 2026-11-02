@@ -42,6 +42,22 @@ Escopo da etapa F2-1 (CONTRACT): tipos serde, schemas das tools, parser de
 `verify.toml`, `openkax mcp` subindo e listando tools; handlers validam e
 respondem `not_implemented`. Execução entra em F2-2 em diante.
 
+## Pacote do operário (F2-3)
+
+- **Idioma:** o system prompt fixo é em **PT-BR** (`SYSTEM_PROMPT`, versão 1 em
+  `SYSTEM_PROMPT_VERSION`, em `src/mcp/packet.rs`); mudar o texto exige subir a versão.
+- **Montagem:** `build_request` lê os arquivos do worktree e monta, na ordem:
+  objetivo, arquivos `read` (com path), arquivos `write` (conteúdo atual ou
+  "novo arquivo"), contratos, restrições, critério de aceite, `CONVENTIONS.md`
+  da raiz (truncado em 4000 caracteres, com aviso) e o formato de saída exigido.
+  Arquivos fora do worktree (symlink) e não-UTF-8 são recusados; CRLF vira LF.
+- **Tamanho:** a estimativa usa `scheduler::estimate_tokens`; acima de
+  `max_packet_tokens` da classe devolve `packet_too_large` sem chamar provider.
+- **Parser:** aceita diff em bloco ```` ```diff ````, `diff --git` ou diff cru; ou
+  arquivos completos em `=== FILE: <path> === … === END FILE ===`. Recusa a
+  resposta inteira se qualquer path for absoluto, tiver `..` ou não estiver na
+  lista `write` (`out_of_scope`). Barras invertidas são normalizadas antes.
+
 ## Consequências
 
 - O lead ganha paralelismo barato, mas toda saída passa por verify antes de

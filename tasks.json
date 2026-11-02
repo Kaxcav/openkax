@@ -252,13 +252,10 @@
     },
     {
       "id": "F2-3",
-      "title": "Pacote enxuto e estimativa contra max_packet_tokens",
-      "owner": "fabrica",
-      "status": "todo",
-      "depends": [
-        "F2-1"
-      ],
-      "note": "Frente da fábrica, na branch Kaxcav/openkax-fase-2 (docs/noturno/FABRICA.md nessa branch). Não é do turno na nuvem."
+      "title": "Pacote enxuto: src/mcp/packet.rs (build_request, parse_response, recusa por max_packet_tokens)",
+      "owner": "lead",
+      "status": "done",
+      "note": "120 unitários (+10 de packet) + 3 mcp_contract (+3 #[ignore] F2-3/F2-4/F2-5 seguem de propósito: execução ponta a ponta depende do runner). System prompt PT-BR v1 (ADR 0007)"
     },
     {
       "id": "F2-4",
