@@ -39,7 +39,9 @@ fn main() -> ExitCode {
         Some("doctor") => run_doctor(),
         Some("report") => run_report(),
         Some(other) => {
-            eprintln!("subcomando desconhecido: {other}\nuso: openkax [serve|mcp|clean|doctor|report]");
+            eprintln!(
+                "subcomando desconhecido: {other}\nuso: openkax [serve|mcp|clean|doctor|report]"
+            );
             ExitCode::from(2)
         }
     }
@@ -129,19 +131,25 @@ fn run_report() -> ExitCode {
             "--since" => match args.next().map(|d| report::parse_since_date(&d)) {
                 Some(Ok(d)) => since = Some(d),
                 Some(Err(e)) => {
-                    eprintln!("{e}
-{usage}");
+                    eprintln!(
+                        "{e}
+{usage}"
+                    );
                     return ExitCode::from(2);
                 }
                 None => {
-                    eprintln!("--since exige AAAA-MM-DD
-{usage}");
+                    eprintln!(
+                        "--since exige AAAA-MM-DD
+{usage}"
+                    );
                     return ExitCode::from(2);
                 }
             },
             other => {
-                eprintln!("argumento desconhecido: {other}
-{usage}");
+                eprintln!(
+                    "argumento desconhecido: {other}
+{usage}"
+                );
                 return ExitCode::from(2);
             }
         }

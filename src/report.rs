@@ -408,7 +408,16 @@ mod tests {
                 req((&t, f, "groq/llama", "ok", 100, 10, "free", 0)),
                 req((&t, f, "groq/llama", "ok", 300, 30, "free", 1)),
                 req((&t, f, "vercel/gpt", "exhausted", 50, 5, "credit", 2)),
-                req((&t, "kax/coder-smart", "deepseek/r1", "ok", 900, 90, "paid", 0)),
+                req((
+                    &t,
+                    "kax/coder-smart",
+                    "deepseek/r1",
+                    "ok",
+                    900,
+                    90,
+                    "paid",
+                    0,
+                )),
                 task(&t, f, "groq", "accepted", 1),
                 task(&t, f, "gemini", "accepted", 2),
                 task(&t, f, "gemini", "needs_lead", 2),
@@ -434,7 +443,10 @@ mod tests {
         );
         assert_eq!(fast.ttft_ms.p50, Some(10));
         assert_eq!((fast.tokens_in, fast.tokens_out), (300, 60));
-        assert_eq!((fast.tier_credit, fast.tier_paid, fast.fallbacks), (1, 0, 3));
+        assert_eq!(
+            (fast.tier_credit, fast.tier_paid, fast.fallbacks),
+            (1, 0, 3)
+        );
         assert_eq!(r.requests_by_class["kax/coder-smart"].tier_paid, 1);
         assert_eq!(r.requests_by_provider_model["groq/llama"].requests, 2);
         assert_eq!(r.requests_by_provider_model["deepseek/r1"].tier_paid, 1);
