@@ -41,3 +41,5 @@ Entradas mais recentes no fim. Formato e regras em `RUNBOOK.md`.
 - decisão nova, no ADR 0006: chamada que nunca recebe `name` some; `finish_reason: "tool_calls"` sem tool emitida vira `end_turn`; `usage` zerado vale como não informado.
 - descartado: `stop` ou EOF com argumentos truncados saem como `tool_use`. O cliente deve recusar o JSON inválido e devolver o erro ao modelo (lido, não testado com o Claude Code), e inventar `max_tokens` diria uma causa que não sabemos. Assinatura depois de o bloco abrir e nome em pedaços: o `id` e o `name` já saíram, e o turno não tem evidência de provider que faça isso.
 - só hipótese, sem provider real, foi para o roteiro da F1-8: Gemini com `id` vazio em chamadas paralelas, `arguments` como objeto, `id` fora do padrão da Anthropic (`functions.Read:0`) se a sessão migrar para `claude-*`.
+
+## 2026-11-02 19:12 — F1-4 endpoint — EM ANDAMENTO
