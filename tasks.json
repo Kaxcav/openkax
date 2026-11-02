@@ -170,7 +170,7 @@
       "depends": [
         "F1-1"
       ],
-      "note": "Inclui aplicar em build_upstream_body os quirks strip_images, thought_signatures e tool_call_id, e ligar thought_signatures no gemini e tool_call_id = \"alnum9\" no mistral (sem mudar rota, limite ou modelo). Fixture remontada do formato público, não capturada: a captura real vai no roteiro da F1-8 (ADR 0006)."
+      "note": "to_openai_request, decode_tool_use_id e quirks strip_images, thought_signatures e tool_call_id em build_upstream_body; thought_signatures no gemini e alnum9 no mistral. 142 unitários + 32 de integração; CI run 41520117016 verde (ubuntu-latest e windows-latest). Fixture remontada do formato público, não capturada: a captura real vai no roteiro da F1-8 (ADR 0006)."
     },
     {
       "id": "F1-3",
