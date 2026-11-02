@@ -715,6 +715,28 @@ fn auth_error_blocks_every_model_of_the_provider() {
     );
 }
 
+/// F0-21: 410 Gone desabilita só o modelo (`model_gone`), sem cooldown no provider.
+#[test]
+fn gone_disables_only_the_model() {
+    let f = fx(SIBLINGS);
+    assert_eq!(fail_flash(&f, &UpstreamError::Gone), None);
+    assert_eq!(f.s.provider_state("gemini"), Some(ProviderState::Healthy));
+    assert_eq!(
+        f.s.model_state("gemini", "gemini-flash"),
+        Some(ProviderState::Disabled {
+            reason: DisabledReason::ModelGone
+        })
+    );
+    let p = f.pick(&req(10));
+    assert_eq!(p.candidates.len(), 1);
+    assert_eq!(&*p.candidates[0].model_id, "gemini-flash-lite");
+    assert_eq!(
+        p.retry_after(),
+        None,
+        "modelo descontinuado não volta sozinho"
+    );
+}
+
 /// F0-17: falha depois do 1º token (`fail` com `started`) esfria só o modelo.
 #[test]
 fn failure_after_first_token_cools_only_the_model() {
@@ -935,6 +957,7 @@ fn observed_remaining_corrects_owning_scope() {
         tpm: None,
         rpd: Some(3),
         tpd: Some(150_000),
+        window: None,
     });
     r.settle(None);
     // rpm é do provider; rpd/tpd são do modelo.
@@ -943,6 +966,61 @@ fn observed_remaining_corrects_owning_scope() {
     assert_eq!(m.rpd_remaining, Some(3));
     // settle depois da observação: o estimado (10) já está contido no header.
     assert_eq!(m.tpd_remaining, Some(150_000));
+}
+
+fn window(quota: u64, window_s: u64, remaining: i64, reset_s: u64) -> Remaining {
+    Remaining {
+        window: Some(WindowObs {
+            quota: Some(quota),
+            window_s: Some(window_s),
+            remaining,
+            reset_s,
+        }),
+        ..Remaining::default()
+    }
+}
+
+/// F0-21: janela IETF aprendida dos headers vira bucket do PROVIDER (mesmo
+/// com o modelo tendo limites próprios) e freia os dois modelos.
+#[test]
+fn ietf_window_paces_the_provider_scope() {
+    let f = fx(SIBLINGS);
+    let p = f.pick(&req(10));
+    let r = f.s.reserve(&p.candidates[0]).unwrap();
+    r.observe_remaining(&window(1200, 300, 2, 1));
+    r.settle(None);
+    assert_eq!(f.snap_provider("gemini").window_remaining, Some(2));
+
+    // 2 requests cabem; a 3ª espera o refill de 1200/300 s = 4 req/s → 0,25 s.
+    for _ in 0..2 {
+        let p = f.pick(&req(10));
+        drop(f.s.reserve(&p.candidates[0]).unwrap());
+    }
+    let p = f.pick(&req(10));
+    assert!(p.candidates.is_empty(), "{p:?}");
+    for (_, s) in p.skipped {
+        assert!(approx(not_now(s), 0.25));
+    }
+    f.clock.advance(Duration::from_millis(250));
+    assert_eq!(f.pick(&req(10)).candidates.len(), 2);
+}
+
+/// F0-21: `r=0` → cooldown do provider até o `t` informado.
+#[test]
+fn ietf_window_exhausted_cools_provider_until_reset() {
+    let f = fx(SIBLINGS);
+    let p = f.pick(&req(10));
+    let r = f.s.reserve(&p.candidates[0]).unwrap();
+    r.observe_remaining(&window(1200, 300, 0, 30));
+    r.settle(None);
+    assert!(is_cooldown(f.s.provider_state("gemini")));
+    assert_eq!(
+        f.s.model_state("gemini", "gemini-flash-lite"),
+        Some(ProviderState::Healthy)
+    );
+    let p = f.pick(&req(10));
+    assert!(p.candidates.is_empty());
+    assert!(approx(p.retry_after().unwrap(), 30.0));
 }
 
 impl Fx {

@@ -131,6 +131,54 @@ async fn model_first_token_timeout_overrides_default() {
     gemini.verify().await;
 }
 
+/// F0-21: 410 Gone → próximo candidato; só o MODELO fica `model_gone` (sem
+/// cooldown no provider) e a 2ª request nem chega nele.
+#[tokio::test]
+async fn gone_disables_model_and_falls_back() {
+    let (groq, gemini) = mocks().await;
+    upstream("k-groq", "qwen-coder")
+        .respond_with(ResponseTemplate::new(410).set_body_json(
+            json!({ "errors": [{ "message": "model deprecated" }], "success": false }),
+        ))
+        .expect(1)
+        .mount(&groq)
+        .await;
+    upstream("k-gemini", "gemini-flash")
+        .respond_with(sse_ok("from-gemini"))
+        .expect(2)
+        .mount(&gemini)
+        .await;
+    let gw = Gateway::spawn(&two_provider_config(&groq.uri(), &gemini.uri()), SECRETS).await;
+
+    for attempt in 1..=2 {
+        let r = gw.chat_stream("kax/coder-fast", "oi").await;
+        assert_eq!(r.status, 200, "request {attempt}: {r:?}");
+        assert_eq!(r.provider.as_deref(), Some("gemini"), "request {attempt}");
+    }
+
+    let q: serde_json::Value = gw
+        .http
+        .get(format!("{}/quota", gw.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(q["providers"][0]["state"]["state"], "healthy", "{q}");
+    assert_eq!(
+        q["providers"][0]["models"][0]["state"]["state"], "disabled",
+        "{q}"
+    );
+    assert_eq!(
+        q["providers"][0]["models"][0]["state"]["reason"], "model_gone",
+        "{q}"
+    );
+
+    groq.verify().await;
+    gemini.verify().await;
+}
+
 /// Critério 3: stream morre depois do 1º token (EOF sem `finish_reason` nem
 /// `[DONE]`) → sem retry; cliente recebe o que já veio, um chunk final com
 /// `finish_reason: "error"` e `[DONE]`. O 2º provider não é chamado.

@@ -18,6 +18,12 @@ Get-Content $envFile | ForEach-Object {
 function Check([string]$name, [string]$url, [hashtable]$headers) {
   try {
     $r = Invoke-WebRequest -Uri $url -Headers $headers -Method GET -TimeoutSec 25 -UseBasicParsing
+    # 2xx que não é JSON (ex.: "OK" text/plain do GitHub Models aposentado) não vale.
+    $ct = "$($r.Headers['Content-Type'])"
+    if ($ct -notmatch 'json') {
+      Write-Host ("[FAIL] {0,-11} HTTP {1} mas {2} (nao e JSON)" -f $name, $r.StatusCode, $ct) -ForegroundColor Red
+      return $null
+    }
     Write-Host ("[OK]   {0,-11} HTTP {1}" -f $name, $r.StatusCode) -ForegroundColor Green
     return $r.Content
   } catch {
@@ -56,6 +62,7 @@ if ($env:GROQ_API_KEY) {
 if ($env:GITHUB_MODELS_TOKEN) {
   $c = Check 'github' 'https://models.github.ai/catalog/models' @{ Authorization = "Bearer $env:GITHUB_MODELS_TOKEN"; Accept = 'application/vnd.github+json' }
   if ($c) { try { Write-Host "       modelos no catalogo: $(($c | ConvertFrom-Json).Count)" } catch {} }
+  else { Write-Host "       GitHub Models foi aposentado em 2026-07-30 (docs.github.com/en/rest/models)." -ForegroundColor Yellow }
 } else { Write-Host "[SKIP] github      sem GITHUB_MODELS_TOKEN" -ForegroundColor DarkGray }
 
 if ($env:OPENROUTER_API_KEY) {

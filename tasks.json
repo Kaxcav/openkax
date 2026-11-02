@@ -82,7 +82,8 @@
       "id": "F0-13",
       "title": "Verificar IDs de modelo de Groq e GitHub Models de outra rede (403/proxy no notebook) e habilitar",
       "owner": "user",
-      "status": "todo"
+      "status": "done",
+      "note": "2026-11-02, PC de casa: Groq habilitado (qwen/qwen3.8-27b); GitHub Models aposentado em 2026-07-30 → segue desligado (F0-21)"
     },
     {
       "id": "F0-14",
@@ -100,7 +101,8 @@
       "id": "F0-16",
       "title": "Preencher VERCEL_AI_GATEWAY_KEY e CLOUDFLARE_API_TOKEN no .env; habilitar cloudflare com IDs conferidos",
       "owner": "user",
-      "status": "todo"
+      "status": "done",
+      "note": "chaves presentes; Cloudflare habilitada; Vercel exige cartão (403) → ver F0-22"
     },
     {
       "id": "F0-17",
@@ -126,6 +128,18 @@
       "title": "Rotas revisadas (codestral à frente do coder-smart e 2º no coder-fast); chars_per_token por modelo; x-openkax-max-tier no ADR 0004",
       "owner": "lead",
       "status": "done"
+    },
+    {
+      "id": "F0-21",
+      "title": "Groq/Cloudflare habilitados com IDs dos catálogos; 410 → model_gone; headers IETF RateLimit no escopo do provider; doctor rejeita 2xx não-JSON; smoke docs/smoke/2026-11-02-f0-21.md",
+      "owner": "lead",
+      "status": "done"
+    },
+    {
+      "id": "F0-22",
+      "title": "Decidir: cadastrar cartão no Vercel AI Gateway (403 'requires a valid credit card on file' até em modelo grátis) ou tirar a Vercel das rotas; e remover o GitHub (aposentado) do providers.toml/rota",
+      "owner": "user",
+      "status": "todo"
     }
   ]
 }

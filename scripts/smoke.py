@@ -2,6 +2,10 @@
 """Smoke real do OpenKax (F0-14): tudo passa PELO GATEWAY local.
 
 Uso: python3 scripts/smoke.py [--base http://127.0.0.1:8000] [--ledger DIR] [--out arquivo.md]
+                               [--only p1,p2]
+
+Com --only: passada 1 só nesses providers e passada 2 pinada em cada modelo deles
+(crédito permitido, pago nunca); sem passada 3.
 
 Passada 1 (texto): 1 request pinada por modelo habilitado (stream, max_tokens=64).
 Passada 2 (tools): 3 primeiros degraus de kax/coder-smart e kax/coder-fast, tool `soma`.
@@ -156,7 +160,7 @@ def last_ledger(ledger_dir):
     files = sorted(glob.glob(os.path.join(ledger_dir, "*.jsonl")))
     if not files:
         return {}
-    with open(files[-1]) as f:
+    with open(files[-1], encoding="utf-8") as f:
         lines = f.read().strip().splitlines()
     return json.loads(lines[-1]) if lines else {}
 
@@ -212,7 +216,9 @@ def main():
     ap.add_argument("--config", default="providers.toml")
     ap.add_argument("--ledger", default="")
     ap.add_argument("--out", default="")
+    ap.add_argument("--only", default="", help="providers separados por vírgula")
     a = ap.parse_args()
+    only = {p for p in a.only.split(",") if p}
 
     cfg = tomllib.load(open(a.config, "rb"))
     tiers = {p["id"]: p.get("tier", "free") for p in cfg["provider"]}
@@ -222,6 +228,8 @@ def main():
     # ---------------- passada 1
     rows = []
     for p in quota["providers"]:
+        if only and p["id"] not in only:
+            continue
         for m in p["models"]:
             label = f'{p["id"]}/{m["id"]}'
             if p["state"]["state"] == "disabled" or m["state"]["state"] == "disabled":
@@ -242,15 +250,29 @@ def main():
 
     # ---------------- passada 2
     rows = []
-    for cls in ("kax/coder-smart", "kax/coder-fast"):
-        route = next(c for c in cfg["class"] if c["id"] == cls)["route"][:3]
+    if only:
+        targets = [("pin", [{"provider": p["id"], "model": m["id"]} for p in quota["providers"]
+                            if p["id"] in only for m in p["models"]])]
+    else:
+        targets = [(cls, next(c for c in cfg["class"] if c["id"] == cls)["route"][:3])
+                   for cls in ("kax/coder-smart", "kax/coder-fast")]
+    disabled = {
+        f'{p["id"]}/{m["id"]}': p["state"].get("reason") or m["state"].get("reason")
+        for p in quota["providers"]
+        for m in p["models"]
+        if "disabled" in (p["state"]["state"], m["state"]["state"])
+    }
+    for cls, route in targets:
         for step in route:
             label = f'{step["provider"]}/{step["model"]}'
-            if tiers.get(step["provider"]) != "free":
+            if tiers.get(step["provider"]) == "paid" or (not only and tiers.get(step["provider"]) != "free"):
                 rows.append([f"{cls} {label}", "skip (tier pago/crédito)", "—", "—", "—", "—", "—", "—"])
                 continue
+            if only and label in disabled:
+                rows.append([f"{cls} {label}", f"skip ({disabled[label]})", "—", "—", "—", "—", "—", "—"])
+                continue
             body = {
-                "model": cls,
+                "model": "kax/coder-smart" if cls == "pin" else cls,
                 "stream": True,
                 "stream_options": {"include_usage": True},
                 "max_tokens": 256,
@@ -263,6 +285,12 @@ def main():
             rows.append(row(f"{cls} {label}", r, last_ledger(a.ledger), tools))
             print("p2", label, rows[-1][1], tools, file=sys.stderr)
     report.append("### Passada 2 — tools (`soma`)\n\n" + table(rows))
+    if only:
+        text = "\n\n".join(report)
+        if a.out:
+            open(a.out, "w", encoding="utf-8").write(text + "\n")
+        print(text)
+        return
 
     # ---------------- passada 3
     rows = []
@@ -294,7 +322,7 @@ def main():
         ensure_ascii=False, indent=1) + "\n```")
     text = "\n\n".join(report)
     if a.out:
-        open(a.out, "w").write(text + "\n")
+        open(a.out, "w", encoding="utf-8").write(text + "\n")
     print(text)
 
 

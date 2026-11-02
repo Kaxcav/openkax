@@ -87,6 +87,8 @@ pub enum DisabledReason {
     AuthRejected,
     /// 404: só o modelo.
     ModelNotFound,
+    /// 410: modelo descontinuado pelo provider; só o modelo (F0-21).
+    ModelGone,
     /// `enabled = false` no TOML.
     ConfigDisabled,
     /// Protocolo ainda não suportado nesta rota (nativo Anthropic até a Fase 1).
@@ -189,6 +191,18 @@ pub struct Remaining {
     pub tpm: Option<i64>,
     pub rpd: Option<i64>,
     pub tpd: Option<i64>,
+    /// Janela IETF (`RateLimit`/`RateLimit-Policy`); sempre do provider.
+    pub window: Option<WindowObs>,
+}
+
+/// Uma observação IETF: `remaining` requests até `reset_s`, numa cota de
+/// `quota` requests a cada `window_s` (quando há `RateLimit-Policy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowObs {
+    pub quota: Option<u64>,
+    pub window_s: Option<u64>,
+    pub remaining: i64,
+    pub reset_s: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -224,6 +238,8 @@ pub struct ProviderQuota {
     pub tpm_remaining: Option<i64>,
     pub rpd_remaining: Option<i64>,
     pub tpd_remaining: Option<i64>,
+    /// Janela aprendida dos headers IETF (F0-21); `None` até a 1ª observação.
+    pub window_remaining: Option<i64>,
     pub models: Vec<ModelQuota>,
 }
 
@@ -336,11 +352,16 @@ struct Rate {
 
 impl Rate {
     fn new(limit: u64, now: Instant) -> Self {
+        Self::per_window(limit, 60, now)
+    }
+
+    /// `limit` a cada `window_s` segundos, com refill contínuo.
+    fn per_window(limit: u64, window_s: u64, now: Instant) -> Self {
         let cap = limit as f64;
         Self {
             cap,
             level: cap,
-            per_sec: cap / 60.0,
+            per_sec: cap / window_s.max(1) as f64,
             last: now,
         }
     }
@@ -385,6 +406,8 @@ impl Daily {
 struct Scope {
     rpm: Option<Rate>,
     tpm: Option<Rate>,
+    /// Janela IETF aprendida dos headers (só no provider).
+    window: Option<Rate>,
     rpd: Option<Daily>,
     tpd: Option<Daily>,
     /// Segundos do dia (UTC) em que RPD/TPD resetam.
@@ -415,6 +438,7 @@ impl Scope {
         Self {
             rpm: limits.and_then(|l| l.rpm).map(|v| Rate::new(v.into(), now)),
             tpm: limits.and_then(|l| l.tpm).map(|v| Rate::new(v.into(), now)),
+            window: None,
             rpd: limits.and_then(|l| l.rpd).map(|v| daily(v.into())),
             tpd: limits.and_then(|l| l.tpd).map(daily),
             reset_offset,
@@ -429,7 +453,10 @@ impl Scope {
 
     /// Refill, virada de janela diária e expiração de cooldown.
     fn tick(&mut self, now: Instant, utc: i64) {
-        for r in [&mut self.rpm, &mut self.tpm].into_iter().flatten() {
+        for r in [&mut self.rpm, &mut self.tpm, &mut self.window]
+            .into_iter()
+            .flatten()
+        {
             r.refill(now);
         }
         let window = (utc - self.reset_offset).div_euclid(DAY_SECS);
@@ -476,7 +503,7 @@ impl Scope {
         if self.max_concurrent.is_some_and(|max| self.in_flight >= max) {
             wait = CONCURRENCY_WAIT;
         }
-        if let Some(r) = &self.rpm {
+        for r in [&self.rpm, &self.window].into_iter().flatten() {
             wait = wait.max(r.wait_for(1.0));
         }
         if let Some(r) = &self.tpm {
@@ -524,9 +551,30 @@ impl Scope {
         left
     }
 
+    /// Janela IETF: (re)cria o bucket com `q`/`w` da política e acerta o
+    /// nível pelo `r`; esgotada → cooldown até o `t` (F0-21).
+    fn apply_window(&mut self, w: WindowObs, now: Instant) {
+        if let (Some(q), Some(ws)) = (w.quota.filter(|q| *q > 0), w.window_s) {
+            let fresh = Rate::per_window(q, ws, now);
+            let same = self
+                .window
+                .as_ref()
+                .is_some_and(|b| b.cap == fresh.cap && b.per_sec == fresh.per_sec);
+            if !same {
+                self.window = Some(fresh);
+            }
+        }
+        if let Some(b) = &mut self.window {
+            b.level = (w.remaining as f64).min(b.cap);
+        }
+        if w.remaining <= 0 {
+            self.cool(now, Duration::from_secs(w.reset_s).max(MIN_COOLDOWN));
+        }
+    }
+
     fn charge_request(&mut self) {
         self.in_flight += 1;
-        if let Some(r) = &mut self.rpm {
+        for r in [&mut self.rpm, &mut self.window].into_iter().flatten() {
             r.level -= 1.0;
         }
         if let Some(d) = &mut self.rpd {
@@ -929,10 +977,15 @@ impl Scheduler {
             .providers
             .iter()
             .map(|p| {
-                let (state, [rpm, tpm, rpd, tpd], in_flight) = {
+                let (state, [rpm, tpm, rpd, tpd], in_flight, window) = {
                     let mut ps = lock(&p.state);
                     ps.tick(now, utc);
-                    (ps.view(now), ps.remaining(), ps.in_flight)
+                    (
+                        ps.view(now),
+                        ps.remaining(),
+                        ps.in_flight,
+                        ps.window.as_ref().map(Rate::remaining),
+                    )
                 };
                 let models = p
                     .models
@@ -966,6 +1019,7 @@ impl Scheduler {
                     tpm_remaining: tpm,
                     rpd_remaining: rpd,
                     tpd_remaining: tpd,
+                    window_remaining: window,
                     models,
                 }
             })
@@ -1039,9 +1093,13 @@ impl Reservation {
         if *r == Remaining::default() {
             return;
         }
+        let now = self.shared.clock.now();
         self.with_scopes(|ps, ms| {
             let left = ms.scope.apply_remaining(*r);
             ps.apply_remaining(left);
+            if let Some(w) = r.window {
+                ps.apply_window(w, now);
+            }
         });
     }
 
@@ -1098,6 +1156,10 @@ impl Reservation {
             }
             UpstreamError::NotFound { .. } => {
                 ms.scope.disabled = Some(DisabledReason::ModelNotFound);
+                None
+            }
+            UpstreamError::Gone => {
+                ms.scope.disabled = Some(DisabledReason::ModelGone);
                 None
             }
             UpstreamError::RateLimited { retry_after, daily } => {

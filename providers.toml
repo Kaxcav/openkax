@@ -37,17 +37,18 @@ cooldown = { on_429_s = 60, on_5xx_s = 20, on_timeout_s = 30, on_4xx_other_s = 6
 id = "groq"
 base_url = "https://api.groq.com/openai/v1"
 auth = { kind = "bearer", env = "GROQ_API_KEY" }
-# Desligado: /models devolveu 403 "Access denied. Please check your network settings"
-# (bloqueio de rede, não de chave) em 2026-11-02. Rode ./doctor.sh de outra rede,
-# preencha `upstream` com IDs reais e remova `enabled = false`.
-enabled = false
+# F0-21 (PC de casa, sem a rede do notebook): /models em 2026-11-02 não tem mais
+# qwen-coder nem llama 70B; o Qwen do catálogo é qwen/qwen3.8-27b (ctx 131072).
+# Limites pelos headers de um chat real: x-ratelimit-limit-requests=1000 (dia),
+# x-ratelimit-limit-tokens=8000 (minuto). RPM não vem em header: 30 do free tier.
 models = [
-  { id = "qwen-coder", max_ctx = 128000, limits = { rpm = 30, tpm = 8000, rpd = 1000, tpd = 200000 }, family = "qwen" },
-  { id = "llama-70b", max_ctx = 128000, limits = { rpm = 30, tpm = 8000, rpd = 1000, tpd = 200000 }, family = "llama" },
+  { id = "qwen3.8-27b", upstream = "qwen/qwen3.8-27b", max_ctx = 131072, limits = { rpm = 30, tpm = 8000, rpd = 1000 }, family = "qwen" },
 ]
 # Groq conta max_tokens no TPM: reserva entrada + min(max_tokens, cap) e clampa no cap.
 # 6000 (pacote máx. do coder-fast) + 2000 = 8000 TPM.
-quirks = { tpm_counts_max_tokens = true, max_tokens_cap = 2000 }
+# reasoning_effort "none" (console.groq.com/docs/reasoning, Qwen 3.8 27B): sem ele o
+# default reasoning_format=raw poria <think> no content.
+quirks = { tpm_counts_max_tokens = true, max_tokens_cap = 2000, disable_thinking = { reasoning_effort = "none" }, ratelimit_headers = { rpd = "x-ratelimit-remaining-requests", tpm = "x-ratelimit-remaining-tokens" } }
 
 [[provider]]
 id = "mistral"
@@ -67,9 +68,10 @@ quirks = { ratelimit_headers = { rpm = "x-ratelimit-remaining-req-minute", tpm =
 id = "github"
 base_url = "https://models.github.ai/inference"
 auth = { kind = "bearer", env = "GITHUB_MODELS_TOKEN" }
-# Desligado: o catálogo (models.github.ai/catalog/models) respondeu "OK" em text/plain
-# para qualquer URL, até sem auth (proxy de rede?) em 2026-11-02. Conferir de outra
-# rede e preencher `upstream`. Limites do tier "low" (teto de entrada pequeno).
+# Desligado: GitHub Models foi APOSENTADO em 2026-07-30 (docs.github.com/en/rest/models:
+# "catalog, inference API … are no longer available to any customer"). O host ainda
+# responde "OK" text/plain para qualquer caminho, com certificado legítimo e sem VPN
+# (PC de casa, 2026-11-02): é placeholder, não catálogo. Candidato a sair do arquivo.
 enabled = false
 models = [
   { id = "github-mini", max_ctx = 8000, limits = { rpm = 15, rpd = 150 }, family = "gpt" },
@@ -161,12 +163,17 @@ quirks = { ascii_json = true }
 id = "cloudflare"
 base_url = "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/v1"
 auth = { kind = "bearer", env = "CLOUDFLARE_API_TOKEN" }
-# 10k neurons/dia (sem bucket equivalente; 429 diário → cooldown até o reset, A4).
-# Desligado: falta CLOUDFLARE_API_TOKEN no .env, então não deu para listar modelos.
-enabled = false
+# ID do catálogo vivo (GET /accounts/$ID/ai/models/search?task=Text Generation, 2026-11-02):
+# sem deprecation/planned_deprecation, sem require_workers_paid, sem raciocínio, ctx 131k.
+# (llama-3.3-70b-instruct-fp8-fast tem só 24k de ctx: curto para o summarizer.)
 models = [
-  { id = "llama-3.3-70b", family = "llama" },
+  { id = "llama-4-scout", upstream = "@cf/meta/llama-4-scout-17b-16e-instruct", max_ctx = 131000, family = "llama" },
 ]
+# 10k neurons/dia: pacing por rpd (estimativa grosseira); estourou → 429 diário →
+# cooldown até o reset (A4). Os headers IETF RateLimit/RateLimit-Policy são o limite
+# da API da conta (ex.: 1200 req / 300 s) e viram janela no escopo do provider.
+limits = { rpd = 100 }
+quirks = { ratelimit_headers = { ietf = true } }
 
 [[provider]]
 id = "vercel"
@@ -192,7 +199,7 @@ native = "anthropic"
 id = "kax/coder-fast"
 max_packet_tokens = 6000
 route = [
-  { provider = "groq", model = "qwen-coder" },
+  { provider = "groq", model = "qwen3.8-27b" },
   { provider = "mistral", model = "codestral" },
   { provider = "zai", model = "glm-4.7-flash" },
   { provider = "sambanova", model = "deepseek-v3.1" },
@@ -241,7 +248,7 @@ max_packet_tokens = 200000
 route = [
   { provider = "gemini", model = "gemini-flash-lite" },
   { provider = "gemini", model = "gemini-flash" },
-  { provider = "cloudflare", model = "llama-3.3-70b" },
+  { provider = "cloudflare", model = "llama-4-scout" },
   { provider = "openrouter", model = "gemma-4-31b" },
   { provider = "vercel", model = "nemotron-3.5-lightning-free" },
 ]

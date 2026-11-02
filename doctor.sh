@@ -35,8 +35,14 @@ tmpdir=$(mktemp -d); trap 'rm -rf "$tmpdir"' EXIT
 CODE=000
 
 req() {  # req NOME URL [args do curl...]  -> define $CODE e grava $tmpdir/NOME.json
-  local name=$1 url=$2; shift 2
-  CODE=$(curl -sS -o "$tmpdir/$name.json" -D "$tmpdir/$name.hdr" -w '%{http_code}' --max-time 25 "$@" "$url" 2>/dev/null || echo 000)
+  local name=$1 url=$2 ctype; shift 2
+  read -r CODE ctype < <(curl -sS -o "$tmpdir/$name.json" -D "$tmpdir/$name.hdr" -w '%{http_code} %{content_type}\n' --max-time 25 "$@" "$url" 2>/dev/null || echo 000)
+  # 2xx que não é JSON (ex.: "OK" text/plain do GitHub Models aposentado) não vale.
+  if [[ "$CODE" == 2* && "$ctype" != *json* ]]; then
+    printf '\e[31m[FAIL] %-11s HTTP %s mas %s (não é JSON): %s\e[0m\n' "$name" "$CODE" "${ctype:-sem content-type}" "$(head -c 60 "$tmpdir/$name.json" | tr -d '\r\n')"
+    CODE=nonjson
+    return
+  fi
   if [[ "$CODE" == 2* ]]; then
     printf '\e[32m[OK]   %-11s HTTP %s\e[0m\n' "$name" "$CODE"
   else
@@ -67,7 +73,7 @@ count_models() {  # count_models ARQUIVO.json
   python3 - "$1" <<'PY'
 import sys, json
 try:
-    d = json.load(open(sys.argv[1]))
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
     if isinstance(d, dict):
         d = d.get("data", d.get("models", []))
     print(len(d) if isinstance(d, list) else "?")
@@ -76,11 +82,30 @@ except Exception:
 PY
 }
 
+cf_pick_model() {  # cf_pick_model ARQUIVO.json → 1º modelo de texto utilizável no plano free
+  python3 -I - "$1" <<'PY'
+import sys, json
+try:
+    models = json.load(open(sys.argv[1], encoding="utf-8")).get("result", [])
+except Exception:
+    sys.exit(0)
+def ok(m):
+    if m.get("deprecation") or m.get("planned_deprecation"):
+        return False
+    props = {p.get("property_id", ""): str(p.get("value")).lower() for p in m.get("properties", [])}
+    if any("deprecat" in k for k in props):
+        return False
+    return all(props.get(k) != "true" for k in ("require_workers_paid", "lora", "beta"))
+names = sorted(m["name"] for m in models if ok(m))
+print(names[0] if names else "")
+PY
+}
+
 openrouter_quota() {  # openrouter_quota ARQUIVO.json
   python3 - "$1" <<'PY'
 import sys, json
 try:
-    d = json.load(open(sys.argv[1]))["data"]
+    d = json.load(open(sys.argv[1], encoding="utf-8"))["data"]
     f = d.get("free_model_daily_requests") or {}
     lim = f.get("limit")
     print(f"       free_model_daily_requests: limit={lim} used={f.get('used')} remaining={f.get('remaining')}")
@@ -116,6 +141,7 @@ else echo -e "\e[90m[SKIP] groq        sem GROQ_API_KEY\e[0m"; fi
 if [[ -n "${GITHUB_MODELS_TOKEN:-}" ]]; then
   req github https://models.github.ai/catalog/models -H "Authorization: Bearer $GITHUB_MODELS_TOKEN" -H "Accept: application/vnd.github+json"
   [[ "$CODE" == 2* ]] && echo "       modelos no catálogo: $(count_models "$tmpdir/github.json")"
+  [[ "$CODE" == nonjson ]] && echo -e "       \e[33mGitHub Models foi aposentado em 2026-07-30 (docs.github.com/en/rest/models).\e[0m"
 else echo -e "\e[90m[SKIP] github      sem GITHUB_MODELS_TOKEN\e[0m"; fi
 
 if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
@@ -153,15 +179,20 @@ else echo -e "\e[90m[SKIP] zai         sem ZAI_API_KEY\e[0m"; fi
 if [[ -n "${CLOUDFLARE_ACCOUNT_ID:-}" && -n "${CLOUDFLARE_API_TOKEN:-}" ]]; then
   cf=https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/ai
   req cloudflare "$cf/models/search?task=Text%20Generation&per_page=100" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"
-  [[ "$CODE" == 2* ]] && echo "       modelos de texto: $(python3 -I -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("result",[])))' "$tmpdir/cloudflare.json" 2>/dev/null || echo '?')"
-  chat cloudflare "$cf/v1" "${CLOUDFLARE_DOCTOR_MODEL:-@cf/meta/llama-3.1-8b-instruct}" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"
+  [[ "$CODE" == 2* ]] && echo "       modelos de texto: $(python3 -I -c 'import json,sys; print(len(json.load(open(sys.argv[1], encoding="utf-8")).get("result",[])))' "$tmpdir/cloudflare.json" 2>/dev/null || echo '?')"
+  # Probe escolhido no catálogo vivo (IDs fixos somem: infire-llama-3.1-8b deu 410).
+  cf_model=${CLOUDFLARE_DOCTOR_MODEL:-$(cf_pick_model "$tmpdir/cloudflare.json")}
+  if [[ -n "$cf_model" ]]; then
+    echo "       probe: $cf_model"
+    chat cloudflare "$cf/v1" "$cf_model" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"
+  else echo -e "       \e[33msem modelo elegível no catálogo para o probe\e[0m"; fi
 else echo -e "\e[90m[SKIP] cloudflare  precisa de CLOUDFLARE_ACCOUNT_ID e CLOUDFLARE_API_TOKEN\e[0m"; fi
 
 if [[ -n "${COHERE_API_KEY:-}" ]]; then
   # Lista pela API nativa (a de compatibilidade não documenta /models).
   req cohere "https://api.cohere.com/v1/models?endpoint=chat&page_size=100" -H "Authorization: Bearer $COHERE_API_KEY"
   [[ "$CODE" == 2* ]] && echo "       modelos de chat: $(count_models "$tmpdir/cohere.json")"
-  chat cohere https://api.cohere.ai/compatibility/v1 "${COHERE_DOCTOR_MODEL:-command-a-plus-05-2026}" -H "Authorization: Bearer $COHERE_API_KEY"
+  chat cohere https://api.cohere.ai/compatibility/v1 "${COHERE_DOCTOR_MODEL:-command-a-03-2025}" -H "Authorization: Bearer $COHERE_API_KEY"
 else echo -e "\e[90m[SKIP] cohere      sem COHERE_API_KEY\e[0m"; fi
 
 if [[ -n "${SAMBANOVA_API_KEY:-}" ]]; then

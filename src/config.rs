@@ -353,6 +353,10 @@ pub struct RateLimitHeaders {
     pub rpd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tpd: Option<String>,
+    /// Lê `RateLimit: "p";r=…;t=…` + `RateLimit-Policy: "p";q=…;w=…` (IETF
+    /// httpapi-ratelimit-headers). Vira uma janela no escopo do PROVIDER (F0-21).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ietf: bool,
 }
 
 impl RateLimitHeaders {
@@ -742,22 +746,41 @@ mod tests {
         assert_eq!(codestral.limits.as_ref().unwrap().rpm, Some(125));
         assert!(mistral.quirks.ratelimit_headers.rpm.is_some());
 
+        // F0-21: Groq habilitado com ID real de /models; Qwen 3.8 só sem raciocínio
+        // (default `raw` poria <think> no content).
         let groq = c.provider("groq").unwrap();
+        assert!(groq.enabled);
         assert!(groq.quirks.tpm_counts_max_tokens);
         assert!(groq.quirks.max_tokens_cap.is_some());
-        let qwen = groq.model("qwen-coder").unwrap();
+        let qwen = groq.model("qwen3.8-27b").unwrap();
+        assert_eq!(qwen.upstream.as_deref(), Some("qwen/qwen3.8-27b"));
         assert_eq!(qwen.limits.as_ref().unwrap().tpm, Some(8000));
+        assert_eq!(qwen.limits.as_ref().unwrap().rpd, Some(1000));
+        assert_eq!(
+            groq.quirks.disable_thinking.as_ref().unwrap()["reasoning_effort"].as_str(),
+            Some("none")
+        );
 
         let or = c.provider("openrouter").unwrap();
         assert_eq!(
             or.extra_headers.get("X-Title").map(String::as_str),
             Some("OpenKax")
         );
-        assert!(c.provider("github").is_some());
+        // GitHub Models foi aposentado em 2026-07-30: segue desligado.
+        assert!(!c.provider("github").unwrap().enabled);
         assert_eq!(c.provider("deepseek").unwrap().tier, Tier::Paid);
-        assert_eq!(c.provider("vercel").unwrap().tier, Tier::Credit);
+        let vercel = c.provider("vercel").unwrap();
+        assert_eq!(vercel.tier, Tier::Credit);
+        assert!(vercel.enabled);
+        // F0-21: Cloudflare habilitada, ID do catálogo vivo, janela IETF no provider.
         let cf = c.provider("cloudflare").unwrap();
+        assert!(cf.enabled);
         assert_eq!(cf.env_refs(), ["CLOUDFLARE_ACCOUNT_ID"]);
+        assert_eq!(
+            cf.model("llama-4-scout").unwrap().upstream.as_deref(),
+            Some("@cf/meta/llama-4-scout-17b-16e-instruct")
+        );
+        assert!(cf.quirks.ratelimit_headers.ietf);
         for p in c.providers.iter().filter(|p| p.native.is_none()) {
             for m in &p.models {
                 assert!(m.family.is_some(), "{}/{} sem family", p.id, m.id);
@@ -829,7 +852,7 @@ mod tests {
         assert_eq!(
             route("kax/coder-fast"),
             [
-                "groq/qwen-coder",
+                "groq/qwen3.8-27b",
                 "mistral/codestral",
                 "zai/glm-4.7-flash",
                 "sambanova/deepseek-v3.1",
@@ -857,7 +880,7 @@ mod tests {
             [
                 "gemini/gemini-flash-lite",
                 "gemini/gemini-flash",
-                "cloudflare/llama-3.3-70b",
+                "cloudflare/llama-4-scout",
                 "openrouter/gemma-4-31b",
                 "vercel/nemotron-3.5-lightning-free",
             ]

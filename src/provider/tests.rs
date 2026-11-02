@@ -69,6 +69,8 @@ fn classify_request_fault_auth_not_found_other() {
         classify_status(404, &h, "", utc0()),
         UpstreamError::NotFound { status: 404 }
     );
+    // F0-21: 410 Gone = modelo descontinuado.
+    assert_eq!(classify_status(410, &h, "", utc0()), UpstreamError::Gone);
     assert_eq!(
         classify_status(408, &h, "", utc0()),
         UpstreamError::RequestTimeout
@@ -418,6 +420,87 @@ fn remaining_from_headers_uses_configured_names() {
     assert_eq!(r.rpd, Some(17));
     assert_eq!(r.rpm, None);
     assert_eq!(r.tpd, None);
+}
+
+/// F0-21: formato IETF (`RateLimit`/`RateLimit-Policy`, structured fields).
+#[test]
+fn ietf_ratelimit_headers_parse_into_window() {
+    use crate::scheduler::WindowObs;
+
+    let p = provider_from("quirks = { ratelimit_headers = { ietf = true } }");
+    let hm = |pairs: &[(&'static str, &'static str)]| {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.append(*k, HeaderValue::from_static(v));
+        }
+        h
+    };
+    let r = remaining_from_headers(
+        &p.quirks.ratelimit_headers,
+        &hm(&[
+            ("ratelimit", "\"default\";r=1199;t=1"),
+            ("ratelimit-policy", "\"default\";q=1200;w=300"),
+        ]),
+    );
+    assert_eq!(
+        r.window,
+        Some(WindowObs {
+            quota: Some(1200),
+            window_s: Some(300),
+            remaining: 1199,
+            reset_s: 1
+        })
+    );
+
+    // Várias políticas: vale a mais apertada (menor `r`), casada pelo nome.
+    let r = remaining_from_headers(
+        &p.quirks.ratelimit_headers,
+        &hm(&[
+            ("ratelimit", "\"burst\";r=50;t=10, \"day\";r=3;t=4000"),
+            (
+                "ratelimit-policy",
+                "\"burst\";q=100;w=60, \"day\";q=10;w=86400",
+            ),
+        ]),
+    );
+    let w = r.window.unwrap();
+    assert_eq!(
+        (w.quota, w.window_s, w.remaining, w.reset_s),
+        (Some(10), Some(86_400), 3, 4000)
+    );
+
+    // Sem policy: ainda serve o restante e o reset.
+    let r = remaining_from_headers(
+        &p.quirks.ratelimit_headers,
+        &hm(&[("ratelimit", "\"default\";r=0;t=30")]),
+    );
+    assert_eq!(
+        r.window,
+        Some(WindowObs {
+            quota: None,
+            window_s: None,
+            remaining: 0,
+            reset_s: 30
+        })
+    );
+
+    // Lixo ou sem `r` → nada.
+    for bad in ["lixo", "\"default\";t=3", "\"default\";r=abc;t=1"] {
+        let h = hm(&[("ratelimit", bad)]);
+        assert_eq!(
+            remaining_from_headers(&p.quirks.ratelimit_headers, &h).window,
+            None,
+            "{bad}"
+        );
+    }
+
+    // Sem o quirk, os headers são ignorados.
+    let off = provider_from("");
+    let h = hm(&[("ratelimit", "\"default\";r=1;t=1")]);
+    assert_eq!(
+        remaining_from_headers(&off.quirks.ratelimit_headers, &h).window,
+        None
+    );
 }
 
 #[test]

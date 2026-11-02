@@ -83,6 +83,17 @@ Mudanças em relação à rota original: codestral entra na frente do `coder-sma
 - No smoke apareceu outro defeito: prompt PT-BR em UTF-8 cru gerava saída degenerada (`W32{A+B}W32…` até o `max_tokens`) ou 422 `NO_VALID_RESPONSE_GENERATED` em 5 de 10 chamadas; o mesmo corpo com não-ASCII escapado (`\uXXXX`) deu 7/7 limpas direto e 5/5 pelo gateway. Quirk nova **`ascii_json`**: só muda a codificação do JSON (mesmo valor), nunca o texto. Nada de limpeza heurística de saída.
 - Sem vazamento de raciocínio com o modelo novo → a Cohere continua no `kax/reviewer`.
 
+### F0-21 (2026-11-02) — providers que faltavam
+
+Conferido do PC de casa (sem a rede do notebook):
+
+- **Groq** habilitado. `/models` não tem mais `qwen-coder` nem llama 70B; entra `qwen/qwen3.8-27b` (local `qwen3.8-27b`, ctx 131 072, RPD 1000 e TPM 8000 pelos headers `x-ratelimit-limit-*`). O `reasoning_format` default da Groq é `raw` (`<think>` no content); `reasoning_effort: "none"` é documentado para o Qwen 3.8 27B e vai em `disable_thinking`.
+- **GitHub Models** segue desligado: aposentado em 2026-07-30 (docs oficiais). O `200 OK` text/plain era placeholder, não proxy. O doctor agora trata 2xx não-JSON como falha.
+- **Cloudflare** habilitada com ID do catálogo vivo (`/ai/models/search?task=Text Generation`), ignorando `deprecation`/`planned_deprecation` e `require_workers_paid`. O probe de chat do doctor também escolhe pelo catálogo.
+- **Vercel** habilitada no TOML, mas o AI Gateway responde 403 "requires a valid credit card on file" até em modelo de preço 0 → `auth_rejected` em runtime. Cadastrar cartão é decisão do usuário; nenhum crédito é comprado.
+- **410 Gone** = modelo descontinuado → `UpstreamError::Gone` → só o modelo fica `Disabled(model_gone)`, sem cooldown no provider e sem entrar no `Retry-After`.
+- **Headers IETF** (`quirks.ratelimit_headers.ietf = true`): `RateLimit: "p";r=…;t=…` + `RateLimit-Policy: "p";q=…;w=…`, casados pelo nome da política (com várias, vale a de menor `r`). Viram um bucket de janela (`q` a cada `w` s, refill contínuo) no escopo do **provider**, debitado a cada request; `r ≤ 0` → cooldown do provider até `t`. `/quota` expõe `providers[].window_remaining`. Na Cloudflare isso é o limite da API da conta; os 10k neurons/dia seguem com pacing por `rpd` e o 429 diário (A4).
+
 ## Consequências
 
 - `providers.toml` antigo com `paid = true` não parseia mais (`deny_unknown_fields`): use `tier = "paid"`.

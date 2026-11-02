@@ -73,6 +73,7 @@ impl fmt::Debug for Secrets {
 /// Mapeamento → ação do scheduler (ADR 0003, F0-17):
 /// - [`RequestFault`](Self::RequestFault): pula o candidato, **sem** cooldown.
 /// - [`Auth`](Self::Auth): **provider** `Disabled` até reload.
+/// - [`NotFound`](Self::NotFound) / [`Gone`](Self::Gone): só o **modelo** `Disabled`.
 /// - [`Network`](Self::Network): cooldown `on_timeout_s` no **provider**.
 /// - [`RateLimited`](Self::RateLimited): cooldown honrando `Retry-After`, no
 ///   modelo se ele tem `limits` próprios, senão no provider.
@@ -91,6 +92,9 @@ pub enum UpstreamError {
     /// 404: modelo inexistente → só o modelo é desabilitado.
     #[error("modelo não encontrado (HTTP {status})")]
     NotFound { status: u16 },
+    /// 410: modelo descontinuado → só o modelo é desabilitado (`model_gone`).
+    #[error("modelo descontinuado (HTTP 410)")]
+    Gone,
     /// `daily`: o corpo indica cota diária esgotada.
     #[error("rate limited (retry_after={retry_after:?}, daily={daily})")]
     RateLimited {
@@ -472,7 +476,51 @@ pub fn remaining_from_headers(
         tpm: get(&names.tpm),
         rpd: get(&names.rpd),
         tpd: get(&names.tpd),
+        window: if names.ietf {
+            ietf_window(headers)
+        } else {
+            None
+        },
     }
+}
+
+/// Itens de um header IETF (`"nome";k=v;k=v, "outro";…`) → `(nome, params)`.
+fn ietf_items(headers: &HeaderMap, name: &str) -> Vec<(String, HashMap<String, String>)> {
+    headers
+        .get_all(name)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .filter_map(|item| {
+            let mut parts = item.split(';').map(str::trim);
+            let policy = parts.next()?.trim_matches('"').to_owned();
+            let params = parts
+                .filter_map(|kv| kv.split_once('='))
+                .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_owned()))
+                .collect();
+            Some((policy, params))
+        })
+        .collect()
+}
+
+/// `RateLimit` (`r` restante, `t` reset em s) + `RateLimit-Policy` (`q` cota,
+/// `w` janela em s), casados pelo nome. Com várias políticas, vale a de menor `r`.
+fn ietf_window(headers: &HeaderMap) -> Option<crate::scheduler::WindowObs> {
+    let policies = ietf_items(headers, "ratelimit-policy");
+    let num = |p: &HashMap<String, String>, k: &str| p.get(k)?.parse::<u64>().ok();
+    ietf_items(headers, "ratelimit")
+        .into_iter()
+        .filter_map(|(name, p)| {
+            let remaining = p.get("r")?.parse::<i64>().ok()?;
+            let policy = policies.iter().find(|(n, _)| *n == name).map(|(_, q)| q);
+            Some(crate::scheduler::WindowObs {
+                quota: policy.and_then(|q| num(q, "q")),
+                window_s: policy.and_then(|q| num(q, "w")),
+                remaining,
+                reset_s: num(&p, "t").unwrap_or(0),
+            })
+        })
+        .min_by_key(|w| w.remaining)
 }
 
 /// Headers de limite para depuração/calibração. Lista branca por prefixo:
@@ -507,6 +555,7 @@ pub fn classify_status(
         },
         401 | 403 => UpstreamError::Auth { status },
         404 => UpstreamError::NotFound { status },
+        410 => UpstreamError::Gone,
         408 => UpstreamError::RequestTimeout,
         429 => UpstreamError::RateLimited {
             retry_after: headers
