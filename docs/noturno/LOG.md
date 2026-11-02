@@ -63,3 +63,13 @@ Entradas mais recentes no fim. Formato e regras em `RUNBOOK.md`.
   - Em `choose`, a classe é resolvida por `resolve_alias` mantendo `req.model` intacto como o modelo pedido pelo cliente para que `anthropic::respond` reflita exatamente o nome solicitado no evento inicial `message_start`.
 - hipóteses não testadas:
   - Comportamento de clientes reais da Anthropic diante de headers não documentados ou timeouts de rede em passthrough direto.
+
+
+## 2026-11-02 20:40 — feat/f1-5-7 revisão (B1, B2, M1, M2, M3) — FEITO
+- entrou:
+  - B1: Client dedicado ao passthrough (`provider::build_passthrough_client`) criado em `Live::build` e reconstruído no hot-reload sem timeout total (apenas `connect_timeout(10s)` e `read_timeout(300s)`). Teste `passthrough_stream_does_not_timeout_on_long_stream` valida stream chunked entregue ao longo de ~2,6 s com `request_timeout_ms = 1000`.
+  - B2: Escopo de roteamento estrito em `messages` e `count_tokens`: após resolução de alias, prefixo `kax/` vai para rota de classe, `claude-` para passthrough e qualquer outro retorna 404 Anthropic ("esta rota aceita apenas classes kax/* e modelos claude-*") registrando `Outcome::Rejected` no ledger. Testes com `gpt-4o` e `kax-coder` conferem 404 e 0 requests ao mock da Anthropic.
+  - M1: Headers de resposta do passthrough mapeados com `append` em vez de `insert` para preservar múltiplos valores (ex: múltiplos `Set-Cookie` ou headers customizados). Testado via `passthrough_preserves_duplicate_response_headers`.
+  - M2: Ordem de declaração de aliases no TOML preservada usando feature `preserve_order` do crate `toml` e `Vec<(String, String)>` com deserializer customizado. Primeiro padrão que casar vence. Testado via `aliases_preserve_declaration_order`.
+  - M3: Doc comment `"/// Filtra e ordena os degraus elegíveis de class_id. Não debita nada."` restaurado sobre `pub fn pick` em `src/scheduler/mod.rs`.
+- testes: 185 unitários + 79 de integração verdes (total 264 testes, 0 ignored). Clippy e fmt 100% limpos.
