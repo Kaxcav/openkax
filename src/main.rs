@@ -1,8 +1,9 @@
 //! Binário `openkax`.
 //!
 //! Uso: `openkax [serve]` (padrão) | `openkax mcp` (Fase 2).
-//! Env: `OPENKAX_CONFIG` (default `./providers.toml`), `OPENKAX_BIND`
-//! (default `127.0.0.1:8000`), `OPENKAX_LOG` (filtro `tracing`, default `info`).
+//! Env: `OPENKAX_CONFIG` (default `./providers.toml`, recarregado ao mudar),
+//! `OPENKAX_BIND` (default `127.0.0.1:8000`), `OPENKAX_LOG` (filtro `tracing`,
+//! default `info`). Buckets persistem em `<state_dir>/buckets.json`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -74,11 +75,44 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     deps.ledger = ledger::spawn(platform.ledger_dir(), 1024);
     let state = AppState::new(deps)?;
 
+    // F0-10: buckets sobrevivem a restart; o providers.toml recarrega sozinho.
+    let snapshot = platform.state_dir().join("buckets.json");
+    match state.restore_state(&snapshot) {
+        Ok(true) => tracing::info!(arquivo = %snapshot.display(), "buckets restaurados"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(arquivo = %snapshot.display(), "snapshot ignorado: {e}"),
+    }
+    let _watcher = server::watch_config(path.clone(), state.clone(), Secrets::from_env)
+        .inspect_err(|e| tracing::warn!("hot-reload desligado: {e}"))
+        .ok();
+    let saver = {
+        let (state, snapshot) = (state.clone(), snapshot.clone());
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(SNAPSHOT_EVERY);
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                save(&state, &snapshot);
+            }
+        })
+    };
+
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!(%bind, "openkax ouvindo");
-    server::serve(listener, state, async {
+    server::serve(listener, state.clone(), async {
         let _ = tokio::signal::ctrl_c().await;
     })
     .await?;
+    saver.abort();
+    save(&state, &snapshot);
     Ok(())
+}
+
+/// Intervalo do snapshot periódico dos buckets (além do salvamento no shutdown).
+const SNAPSHOT_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn save(state: &AppState, path: &std::path::Path) {
+    if let Err(e) = state.save_state(path) {
+        tracing::warn!(arquivo = %path.display(), "falha ao salvar buckets: {e}");
+    }
 }

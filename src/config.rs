@@ -289,10 +289,10 @@ pub struct Limits {
     /// Requests simultâneas no escopo (N2): slot tomado no `reserve`, solto ao fechar a reserva.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent: Option<u32>,
-    /// Informativo até o snapshot da F0-10 (N6); até lá o pacing é via `rpd`.
+    /// Bucket mensal de tokens (mês UTC); persiste no snapshot (F0-10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens_per_month: Option<u64>,
-    /// Informativo até o snapshot da F0-10 (N6).
+    /// Bucket mensal de requests (mês UTC); persiste no snapshot (F0-10).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requests_per_month: Option<u64>,
     /// Sobrescreve o horário de reset de RPD/TPD deste escopo.

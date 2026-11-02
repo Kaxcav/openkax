@@ -58,9 +58,9 @@
     },
     {
       "id": "F0-10",
-      "title": "/v1/models e /quota (feitos); hot-reload do providers.toml; snapshot JSON dos buckets",
+      "title": "/v1/models e /quota; hot-reload do providers.toml (notify); snapshot JSON dos buckets (inclusive mensais) restaurado no start (ADR 0005)",
       "owner": "lead",
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "F0-11",

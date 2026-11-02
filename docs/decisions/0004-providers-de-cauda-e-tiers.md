@@ -66,7 +66,7 @@ Mudanças em relação à rota original: codestral entra na frente do `coder-sma
 - **N5 — `family`** por modelo.
   - `x-openkax-exclude-family: a,b` (sem diferenciar caixa) tira essas famílias da rota (`Skip::Excluded`, que não entra no `Retry-After`).
   - É o hook para o `kax/reviewer` de família diferente na Fase 2.
-- **N6 — mensais**: `requests_per_month`/`tokens_per_month` são só informativos até o snapshot da F0-10; o pacing é via `rpd`.
+- **N6 — mensais**: `requests_per_month`/`tokens_per_month` viraram buckets de verdade na F0-10 (mês UTC, persistidos no snapshot; ADR 0005). O `rpd` continua espalhando a cota ao longo do mês.
 - **Headers de saldo**: `quirks.ratelimit_headers = { rpm?, tpm?, rpd?, tpd? }` mapeia nomes de header → bucket. O valor corrige o escopo dono do limite (modelo antes do provider), em sucesso e em erro.
 - **Teto de tier** (F0-14, aprovado na F0-20): header de request `x-openkax-max-tier: free|credit|paid`.
   - Degraus de tier acima do teto viram `Skip::Excluded` (não entram no `Retry-After`); valor inválido → 400.

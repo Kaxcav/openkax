@@ -17,8 +17,9 @@
 //!   traz os headers de limite do upstream como `x-openkax-upstream-<nome>`.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use axum::Router;
@@ -36,8 +37,8 @@ use crate::config::{Auth, Config, Tier};
 use crate::ledger::{self, LedgerEntry, LedgerHandle, Outcome, RequestRecord};
 use crate::provider::{self, ProviderClient, Secrets, StartedStream, UpstreamError};
 use crate::scheduler::{
-    Candidate, Clock, NotNow, Pick, PickError, PickOptions, PinError, Reservation, Scheduler,
-    SystemClock,
+    BucketsSnapshot, Candidate, Clock, NotNow, Pick, PickError, PickOptions, PinError, Reservation,
+    Scheduler, SystemClock,
 };
 use crate::translate::openai::{
     ChatCompletionChunk, ChatCompletionRequest, ChunkChoice, Delta, Usage,
@@ -80,71 +81,223 @@ pub enum StartupError {
     Http(#[from] reqwest::Error),
 }
 
-/// Estado compartilhado pelas rotas.
+/// Estado compartilhado pelas rotas. A config é trocada a quente
+/// ([`reload`](Self::reload)); cada request enxerga uma geração só ([`View`]).
 #[derive(Clone)]
 pub struct AppState {
-    inner: Arc<Inner>,
+    hub: Arc<Hub>,
 }
 
-struct Inner {
+struct Hub {
+    live: RwLock<Arc<Live>>,
+    clock: Arc<dyn Clock>,
+    /// Requests atendidas por tier (free, credit, paid) desde o start (N3).
+    served: [AtomicU64; 3],
+    ledger: LedgerHandle,
+}
+
+/// Uma geração de config: tudo que muda junto num reload (F0-10).
+struct Live {
     config: Config,
     /// `config.providers` com `${VAR}` resolvidas (N1); ausentes ficam como estão
     /// (o scheduler já os marca `MissingEnv`).
     resolved: Vec<crate::config::Provider>,
-    /// Requests atendidas por tier (free, credit, paid) desde o start (N3).
-    served: [AtomicU64; 3],
     secrets: Secrets,
     scheduler: Scheduler,
     client: ProviderClient,
-    ledger: LedgerHandle,
 }
 
-impl AppState {
-    pub fn new(deps: Deps) -> Result<Self, StartupError> {
-        let http = provider::build_http_client(Duration::from_millis(
-            deps.config.defaults.request_timeout_ms,
-        ))?;
-        let scheduler = Scheduler::new(&deps.config, deps.clock, &|env| {
-            deps.secrets.get(env).is_some()
-        });
-        let lookup = |k: &str| deps.secrets.get(k).map(str::to_owned);
-        let resolved = deps
-            .config
+impl Live {
+    fn build(
+        config: Config,
+        secrets: Secrets,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, StartupError> {
+        let http =
+            provider::build_http_client(Duration::from_millis(config.defaults.request_timeout_ms))?;
+        let scheduler = Scheduler::new(&config, clock, &|env| secrets.get(env).is_some());
+        let lookup = |k: &str| secrets.get(k).map(str::to_owned);
+        let resolved = config
             .providers
             .iter()
             .map(|p| p.resolve_env(&lookup).unwrap_or_else(|_| p.clone()))
             .collect();
         Ok(Self {
-            inner: Arc::new(Inner {
-                resolved,
+            config,
+            resolved,
+            secrets,
+            scheduler,
+            client: ProviderClient::new(http),
+        })
+    }
+}
+
+/// O que uma request usa do começo ao fim: a geração viva quando ela chegou.
+/// Reservations em voo fecham no scheduler da própria geração.
+#[derive(Clone)]
+struct View {
+    hub: Arc<Hub>,
+    live: Arc<Live>,
+}
+
+impl View {
+    fn config(&self) -> &Config {
+        &self.live.config
+    }
+
+    fn scheduler(&self) -> &Scheduler {
+        &self.live.scheduler
+    }
+
+    fn ledger(&self) -> &LedgerHandle {
+        &self.hub.ledger
+    }
+
+    fn api_key(&self, provider_idx: usize) -> Option<&str> {
+        match &self.live.config.providers[provider_idx].auth {
+            Auth::Bearer { env } => self.live.secrets.get(env),
+            Auth::Passthrough | Auth::None => None,
+        }
+    }
+}
+
+impl AppState {
+    pub fn new(deps: Deps) -> Result<Self, StartupError> {
+        let live = Live::build(deps.config, deps.secrets, deps.clock.clone())?;
+        Ok(Self {
+            hub: Arc::new(Hub {
+                live: RwLock::new(Arc::new(live)),
+                clock: deps.clock,
                 served: Default::default(),
-                config: deps.config,
-                secrets: deps.secrets,
-                scheduler,
-                client: ProviderClient::new(http),
                 ledger: deps.ledger,
             }),
         })
     }
 
-    pub fn config(&self) -> &Config {
-        &self.inner.config
+    fn view(&self) -> View {
+        View {
+            hub: self.hub.clone(),
+            live: self
+                .hub
+                .live
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone(),
+        }
     }
 
-    pub fn scheduler(&self) -> &Scheduler {
-        &self.inner.scheduler
+    /// Scheduler da geração viva.
+    pub fn scheduler(&self) -> Scheduler {
+        self.view().live.scheduler.clone()
     }
 
     pub fn ledger(&self) -> &LedgerHandle {
-        &self.inner.ledger
+        &self.hub.ledger
     }
 
-    fn api_key(&self, provider_idx: usize) -> Option<&str> {
-        match &self.inner.config.providers[provider_idx].auth {
-            Auth::Bearer { env } => self.inner.secrets.get(env),
-            Auth::Passthrough | Auth::None => None,
-        }
+    /// Troca a config a quente (F0-10). Buckets, cooldowns e chars/token passam
+    /// para a geração nova casando por id; `Disabled` volta a valer só se
+    /// acontecer de novo (é "até reload"). Requests em voo terminam na antiga.
+    pub fn reload(&self, config: Config, secrets: Secrets) -> Result<(), StartupError> {
+        let next = Live::build(config, secrets, self.hub.clock.clone())?;
+        let mut live = self
+            .hub
+            .live
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        next.scheduler.restore_state(&live.scheduler.export_state());
+        *live = Arc::new(next);
+        Ok(())
     }
+
+    /// Grava o snapshot dos buckets em `path` (JSON; escrita atômica via
+    /// arquivo temporário + rename). Cria o diretório se faltar.
+    pub fn save_state(&self, path: &Path) -> std::io::Result<()> {
+        let snap = self.scheduler().export_state();
+        let json = serde_json::to_vec_pretty(&snap).map_err(std::io::Error::other)?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, path)
+    }
+
+    /// Restaura o snapshot de `path`. `Ok(false)` se o arquivo não existe;
+    /// JSON inválido → `Err(InvalidData)` e o estado fica como estava.
+    pub fn restore_state(&self, path: &Path) -> std::io::Result<bool> {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        let snap: BucketsSnapshot = serde_json::from_slice(&bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        self.scheduler().restore_state(&snap);
+        Ok(true)
+    }
+}
+
+/// Mantém o watcher do `providers.toml` vivo; dropar para de observar.
+pub struct ConfigWatcher {
+    _watcher: notify::RecommendedWatcher,
+}
+
+/// Espera depois do 1º evento antes de reler: editores gravam em rajadas.
+const RELOAD_DEBOUNCE: Duration = Duration::from_millis(300);
+
+/// Observa o diretório de `path` (editores trocam o arquivo por rename) e
+/// recarrega a config quando ele muda. TOML inválido é logado e ignorado: a
+/// config viva continua. `secrets` resolve as chaves da config nova.
+pub fn watch_config(
+    path: PathBuf,
+    state: AppState,
+    secrets: impl Fn(&Config) -> Secrets + Send + 'static,
+) -> notify::Result<ConfigWatcher> {
+    use notify::Watcher;
+
+    let file_name = path.file_name().map(ToOwned::to_owned);
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let mut watcher = notify::recommended_watcher(move |ev: notify::Result<notify::Event>| {
+        if let Ok(ev) = ev
+            && !ev.kind.is_access()
+            && ev
+                .paths
+                .iter()
+                .any(|p| p.file_name() == file_name.as_deref())
+        {
+            let _ = tx.send(());
+        }
+    })?;
+    watcher.watch(&dir, notify::RecursiveMode::NonRecursive)?;
+    std::thread::Builder::new()
+        .name("openkax-config-watch".into())
+        .spawn(move || {
+            while rx.recv().is_ok() {
+                std::thread::sleep(RELOAD_DEBOUNCE);
+                while rx.try_recv().is_ok() {}
+                match Config::load(&path) {
+                    Ok(cfg) => {
+                        let s = secrets(&cfg);
+                        match state.reload(cfg, s) {
+                            Ok(()) => {
+                                tracing::info!(config = %path.display(), "config recarregada")
+                            }
+                            Err(e) => tracing::warn!("reload falhou, config anterior mantida: {e}"),
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("providers.toml inválido, config anterior mantida: {e}")
+                    }
+                }
+            }
+        })
+        .map_err(notify::Error::io)?;
+    Ok(ConfigWatcher { _watcher: watcher })
 }
 
 pub fn router(state: AppState) -> Router {
@@ -171,7 +324,8 @@ async fn health() -> &'static str {
     "ok"
 }
 
-async fn models(State(st): State<AppState>) -> Response {
+async fn models(State(app): State<AppState>) -> Response {
+    let st = app.view();
     let data: Vec<Value> = st
         .config()
         .classes
@@ -181,11 +335,12 @@ async fn models(State(st): State<AppState>) -> Response {
     axum::Json(json!({ "object": "list", "data": data })).into_response()
 }
 
-async fn quota(State(st): State<AppState>) -> Response {
+async fn quota(State(app): State<AppState>) -> Response {
+    let st = app.view();
     let mut v = serde_json::to_value(st.scheduler().snapshot()).unwrap_or(Value::Null);
     if let Some(o) = v.as_object_mut() {
         o.insert("ledger_dropped".into(), st.ledger().dropped().into());
-        let served = &st.inner.served;
+        let served = &st.hub.served;
         o.insert(
             "served_by_tier".into(),
             json!({
@@ -216,7 +371,7 @@ struct Meta {
 impl Meta {
     fn record(
         &self,
-        st: &AppState,
+        st: &View,
         cand: Option<&Candidate>,
         usage: Option<Usage>,
         ttft: Option<Duration>,
@@ -234,7 +389,7 @@ impl Meta {
                 Tier::Credit => 1,
                 Tier::Paid => 2,
             };
-            st.inner.served[i].fetch_add(1, Ordering::Relaxed);
+            st.hub.served[i].fetch_add(1, Ordering::Relaxed);
         }
         st.ledger().record(LedgerEntry::Request(RequestRecord {
             ts: ledger::rfc3339(SystemTime::now()),
@@ -262,7 +417,12 @@ fn header_str<'a>(h: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .filter(|v| !v.is_empty())
 }
 
-async fn chat_completions(State(st): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+async fn chat_completions(
+    State(app): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let st = app.view();
     let started = Instant::now();
     let req: ChatCompletionRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -318,13 +478,13 @@ async fn chat_completions(State(st): State<AppState>, headers: HeaderMap, body: 
                 continue;
             }
         };
-        let provider_cfg = &st.inner.resolved[cand.provider_idx];
+        let provider_cfg = &st.live.resolved[cand.provider_idx];
         let (first_token_timeout, first_token_timeout_reasoning) = st
             .config()
             .defaults
             .first_token_timeouts(provider_cfg.models.get(cand.model_idx));
         let attempt = st
-            .inner
+            .live
             .client
             .start_stream(
                 provider_cfg,
@@ -433,11 +593,7 @@ async fn chat_completions(State(st): State<AppState>, headers: HeaderMap, body: 
 
 /// Escolhe os candidatos: pin (depuração) ou rota da classe com filtros.
 #[allow(clippy::result_large_err)]
-fn choose(
-    st: &AppState,
-    headers: &HeaderMap,
-    req: &ChatCompletionRequest,
-) -> Result<Pick, Response> {
+fn choose(st: &View, headers: &HeaderMap, req: &ChatCompletionRequest) -> Result<Pick, Response> {
     let pick_err = |e: PickError| {
         let status = match e {
             PickError::UnknownClass(_) => StatusCode::NOT_FOUND,
@@ -553,7 +709,7 @@ fn output_chars(chunk: &ChatCompletionChunk) -> usize {
 /// Dropado antes do fim (cliente desconectou) → `Reservation::drop` cobra o
 /// estimado sem cooldown e o ledger registra `client_disconnected`.
 struct Relay {
-    st: AppState,
+    st: View,
     meta: Meta,
     cand: Candidate,
     res: Option<Reservation>,
@@ -674,7 +830,7 @@ impl Drop for Relay {
 }
 
 fn new_relay(
-    st: AppState,
+    st: View,
     meta: Meta,
     cand: Candidate,
     res: Reservation,
@@ -698,7 +854,7 @@ fn new_relay(
 }
 
 fn stream_response(
-    st: AppState,
+    st: View,
     meta: Meta,
     cand: Candidate,
     res: Reservation,
@@ -734,7 +890,7 @@ fn stream_response(
 
 /// Cliente sem streaming: consome o stream upstream e monta `chat.completion`.
 async fn aggregate_response(
-    st: &AppState,
+    st: &View,
     meta: Meta,
     cand: &Candidate,
     res: Reservation,

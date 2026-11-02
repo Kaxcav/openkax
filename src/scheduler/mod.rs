@@ -6,10 +6,11 @@
 //! Não faz I/O e não tem `async`: o tempo vem de um [`Clock`] injetável e
 //! nenhum lock atravessa `.await`.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::provider::UpstreamError;
@@ -240,6 +241,9 @@ pub struct ProviderQuota {
     pub tpd_remaining: Option<i64>,
     /// Janela aprendida dos headers IETF (F0-21); `None` até a 1ª observação.
     pub window_remaining: Option<i64>,
+    /// Buckets mensais (mês UTC), F0-10.
+    pub requests_month_remaining: Option<i64>,
+    pub tokens_month_remaining: Option<i64>,
     pub models: Vec<ModelQuota>,
 }
 
@@ -258,7 +262,63 @@ pub struct ModelQuota {
     pub tpm_remaining: Option<i64>,
     pub rpd_remaining: Option<i64>,
     pub tpd_remaining: Option<i64>,
+    pub requests_month_remaining: Option<i64>,
+    pub tokens_month_remaining: Option<i64>,
 }
+
+/// Estado persistível dos buckets (F0-10): vai para `state/buckets.json` e
+/// atravessa o hot-reload. Tempos em segundos de parede (UTC), porque
+/// `Instant` não sobrevive a restart. `Disabled` nunca entra (vale até reload).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BucketsSnapshot {
+    pub version: u32,
+    /// Segundos UTC (com fração) do export; base do refill no restore.
+    pub saved_at_utc: f64,
+    /// `"provider"` ou `"provider/modelo"` → estado do escopo.
+    pub scopes: BTreeMap<String, ScopeSnapshot>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ScopeSnapshot {
+    /// Nível dos buckets de refill contínuo no export.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpm: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tpm: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<WindowSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpd: Option<CounterSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tpd: Option<CounterSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requests_month: Option<CounterSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_month: Option<CounterSnapshot>,
+    /// Cooldown restante no export, em segundos.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooldown_s: Option<f64>,
+    /// Só em modelo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chars_per_token: Option<f64>,
+}
+
+/// Janela IETF aprendida (é dado do upstream, não do TOML: vai inteira).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WindowSnapshot {
+    pub cap: f64,
+    pub per_sec: f64,
+    pub level: f64,
+}
+
+/// Contador de janela fixa (dia ou mês UTC): `window` é o índice da janela.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CounterSnapshot {
+    pub used: i64,
+    pub window: i64,
+}
+
+const SNAPSHOT_VERSION: u32 = 1;
 
 /// [`ProviderState`] serializável (sem `Instant`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -387,7 +447,8 @@ impl Rate {
     }
 }
 
-/// Contador de janela diária (RPD/TPD) com reset num horário UTC.
+/// Contador de janela fixa: diária (RPD/TPD, reset num horário UTC) ou
+/// mensal (mês UTC, F0-10). `window` é o índice da janela corrente.
 #[derive(Debug)]
 struct Daily {
     limit: u64,
@@ -398,6 +459,21 @@ struct Daily {
 impl Daily {
     fn remaining(&self) -> i64 {
         self.limit as i64 - self.used
+    }
+
+    fn export(&self) -> CounterSnapshot {
+        CounterSnapshot {
+            used: self.used,
+            window: self.window,
+        }
+    }
+}
+
+impl Rate {
+    /// Nível salvo + refill pelo tempo decorrido desde o export.
+    fn restore(&mut self, level: f64, elapsed_s: f64, now: Instant) {
+        self.level = (level + elapsed_s * self.per_sec).min(self.cap);
+        self.last = now;
     }
 }
 
@@ -410,6 +486,9 @@ struct Scope {
     window: Option<Rate>,
     rpd: Option<Daily>,
     tpd: Option<Daily>,
+    /// Mensais (mês UTC), F0-10.
+    rpmo: Option<Daily>,
+    tpmo: Option<Daily>,
     /// Segundos do dia (UTC) em que RPD/TPD resetam.
     reset_offset: i64,
     has_daily: bool,
@@ -435,12 +514,19 @@ impl Scope {
             used: 0,
             window,
         };
+        let monthly = |limit: u64| Daily {
+            limit,
+            used: 0,
+            window: month_index(utc),
+        };
         Self {
             rpm: limits.and_then(|l| l.rpm).map(|v| Rate::new(v.into(), now)),
             tpm: limits.and_then(|l| l.tpm).map(|v| Rate::new(v.into(), now)),
             window: None,
             rpd: limits.and_then(|l| l.rpd).map(|v| daily(v.into())),
             tpd: limits.and_then(|l| l.tpd).map(daily),
+            rpmo: limits.and_then(|l| l.requests_per_month).map(monthly),
+            tpmo: limits.and_then(|l| l.tokens_per_month).map(monthly),
             reset_offset,
             has_daily: limits.is_some_and(crate::config::Limits::has_daily),
             cooldown_until: None,
@@ -460,9 +546,17 @@ impl Scope {
             r.refill(now);
         }
         let window = (utc - self.reset_offset).div_euclid(DAY_SECS);
-        for d in [&mut self.rpd, &mut self.tpd].into_iter().flatten() {
-            if d.window != window {
-                d.window = window;
+        let month = month_index(utc);
+        for (d, w) in [
+            (&mut self.rpd, window),
+            (&mut self.tpd, window),
+            (&mut self.rpmo, month),
+            (&mut self.tpmo, month),
+        ] {
+            if let Some(d) = d
+                && d.window != w
+            {
+                d.window = w;
                 d.used = 0;
             }
         }
@@ -490,7 +584,10 @@ impl Scope {
         }
         let t = f64::from(tokens);
         if self.tpm.as_ref().is_some_and(|r| r.cap < t)
-            || self.tpd.as_ref().is_some_and(|d| (d.limit as f64) < t)
+            || [&self.tpd, &self.tpmo]
+                .into_iter()
+                .flatten()
+                .any(|d| (d.limit as f64) < t)
         {
             return Err(Skip::NeverFits);
         }
@@ -516,6 +613,14 @@ impl Scope {
             .is_some_and(|d| d.remaining() < i64::from(tokens));
         if rpd_out || tpd_out {
             wait = wait.max(self.secs_to_reset(utc));
+        }
+        let month_out = self.rpmo.as_ref().is_some_and(|d| d.remaining() < 1)
+            || self
+                .tpmo
+                .as_ref()
+                .is_some_and(|d| d.remaining() < i64::from(tokens));
+        if month_out {
+            wait = wait.max(secs_to_next_month(utc));
         }
         if wait > Duration::ZERO {
             Err(Skip::NotNow { ready_in: wait })
@@ -577,7 +682,7 @@ impl Scope {
         for r in [&mut self.rpm, &mut self.window].into_iter().flatten() {
             r.level -= 1.0;
         }
-        if let Some(d) = &mut self.rpd {
+        for d in [&mut self.rpd, &mut self.rpmo].into_iter().flatten() {
             d.used += 1;
         }
     }
@@ -587,7 +692,7 @@ impl Scope {
         if let Some(r) = &mut self.tpm {
             r.level = (r.level - delta as f64).min(r.cap);
         }
-        if let Some(d) = &mut self.tpd {
+        for d in [&mut self.tpd, &mut self.tpmo].into_iter().flatten() {
             d.used = (d.used + delta).max(0);
         }
     }
@@ -622,6 +727,71 @@ impl Scope {
             ProviderState::Disabled { reason } => StateView::Disabled { reason },
             ProviderState::Degraded => StateView::Degraded,
         }
+    }
+
+    fn monthly_remaining(&self) -> [Option<i64>; 2] {
+        [
+            self.rpmo.as_ref().map(Daily::remaining),
+            self.tpmo.as_ref().map(Daily::remaining),
+        ]
+    }
+
+    /// Estado persistível (F0-10). Chamar depois de `tick`.
+    fn export(&self, now: Instant) -> ScopeSnapshot {
+        ScopeSnapshot {
+            rpm: self.rpm.as_ref().map(|r| r.level),
+            tpm: self.tpm.as_ref().map(|r| r.level),
+            window: self.window.as_ref().map(|r| WindowSnapshot {
+                cap: r.cap,
+                per_sec: r.per_sec,
+                level: r.level,
+            }),
+            rpd: self.rpd.as_ref().map(Daily::export),
+            tpd: self.tpd.as_ref().map(Daily::export),
+            requests_month: self.rpmo.as_ref().map(Daily::export),
+            tokens_month: self.tpmo.as_ref().map(Daily::export),
+            cooldown_s: self
+                .cooldown_until
+                .filter(|u| *u > now)
+                .map(|u| (u - now).as_secs_f64()),
+            chars_per_token: None,
+        }
+    }
+
+    /// Aplica um export sobre os buckets que ESTA config declara: bucket que
+    /// sumiu é ignorado, bucket novo fica cheio, nível acima do teto é cortado.
+    /// Contadores de janela já virada são zerados pelo `tick` do fim.
+    fn restore(&mut self, s: &ScopeSnapshot, elapsed_s: f64, now: Instant, utc: i64) {
+        for (b, level) in [(&mut self.rpm, s.rpm), (&mut self.tpm, s.tpm)] {
+            if let (Some(b), Some(level)) = (b, level) {
+                b.restore(level, elapsed_s, now);
+            }
+        }
+        if let Some(w) = s.window.filter(|w| w.cap > 0.0 && w.per_sec > 0.0) {
+            let mut b = Rate {
+                cap: w.cap,
+                level: w.level,
+                per_sec: w.per_sec,
+                last: now,
+            };
+            b.restore(w.level, elapsed_s, now);
+            self.window = Some(b);
+        }
+        for (d, c) in [
+            (&mut self.rpd, s.rpd),
+            (&mut self.tpd, s.tpd),
+            (&mut self.rpmo, s.requests_month),
+            (&mut self.tpmo, s.tokens_month),
+        ] {
+            if let (Some(d), Some(c)) = (d, c) {
+                d.used = c.used.max(0);
+                d.window = c.window;
+            }
+        }
+        if let Some(rem) = s.cooldown_s.map(|c| c - elapsed_s).filter(|r| *r > 0.0) {
+            self.cool(now, Duration::from_secs_f64(rem));
+        }
+        self.tick(now, utc);
     }
 
     fn remaining(&self) -> [Option<i64>; 4] {
@@ -662,6 +832,42 @@ fn combine(a: Result<(), Skip>, b: Result<(), Skip>) -> Result<(), Skip> {
             Err(if pick_x { x } else { y })
         }
     }
+}
+
+/// Segundos UTC com fração (base do refill no restore do snapshot).
+fn utc_secs_f64(t: SystemTime) -> f64 {
+    match t.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(d) => d.as_secs_f64(),
+        Err(e) => -e.duration().as_secs_f64(),
+    }
+}
+
+/// `(ano, mês 1-12, dia)` do dia `z` desde 1970-01-01 (Howard Hinnant).
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y, m, d)
+}
+
+/// Índice do mês UTC (`ano*12 + mês-1`) de um instante em segundos UTC.
+fn month_index(utc: i64) -> i64 {
+    let (y, m, _) = civil_from_days(utc.div_euclid(DAY_SECS));
+    y * 12 + m - 1
+}
+
+/// Até 00:00 UTC do dia 1 do mês seguinte.
+fn secs_to_next_month(utc: i64) -> Duration {
+    let (y, m, _) = civil_from_days(utc.div_euclid(DAY_SECS));
+    let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+    let next = crate::provider::days_from_civil(ny, nm, 1) * DAY_SECS;
+    Duration::from_secs((next - utc).max(0) as u64)
 }
 
 fn utc_secs(t: SystemTime) -> i64 {
@@ -969,6 +1175,61 @@ impl Scheduler {
         Some(ms.scope.state(now))
     }
 
+    /// Estado dos buckets para persistir ou levar a um scheduler novo (F0-10).
+    pub fn export_state(&self) -> BucketsSnapshot {
+        let sh = &*self.shared;
+        let now = sh.clock.now();
+        let utc_now = sh.clock.utc_now();
+        let utc = utc_secs(utc_now);
+        let mut scopes = BTreeMap::new();
+        for p in &sh.providers {
+            let mut ps = lock(&p.state);
+            ps.tick(now, utc);
+            scopes.insert(p.id.to_string(), ps.export(now));
+            for m in &p.models {
+                let mut ms = lock(&m.scope);
+                ms.scope.tick(now, utc);
+                let mut s = ms.scope.export(now);
+                s.chars_per_token = Some(ms.chars_per_token);
+                scopes.insert(format!("{}/{}", p.id, m.id), s);
+            }
+        }
+        BucketsSnapshot {
+            version: SNAPSHOT_VERSION,
+            saved_at_utc: utc_secs_f64(utc_now),
+            scopes,
+        }
+    }
+
+    /// Aplica um [`BucketsSnapshot`] casando por id de provider e
+    /// `provider/modelo`; o que não casa é ignorado. Versão desconhecida: nada.
+    pub fn restore_state(&self, snap: &BucketsSnapshot) {
+        if snap.version != SNAPSHOT_VERSION {
+            return;
+        }
+        let sh = &*self.shared;
+        let now = sh.clock.now();
+        let utc_now = sh.clock.utc_now();
+        let utc = utc_secs(utc_now);
+        let elapsed = (utc_secs_f64(utc_now) - snap.saved_at_utc).max(0.0);
+        for p in &sh.providers {
+            let mut ps = lock(&p.state);
+            if let Some(s) = snap.scopes.get(&*p.id) {
+                ps.restore(s, elapsed, now, utc);
+            }
+            for m in &p.models {
+                let Some(s) = snap.scopes.get(&format!("{}/{}", p.id, m.id)) else {
+                    continue;
+                };
+                let mut ms = lock(&m.scope);
+                ms.scope.restore(s, elapsed, now, utc);
+                if let Some(cpt) = s.chars_per_token.filter(|c| c.is_finite() && *c > 0.0) {
+                    ms.chars_per_token = cpt;
+                }
+            }
+        }
+    }
+
     pub fn snapshot(&self) -> QuotaSnapshot {
         let sh = &*self.shared;
         let now = sh.clock.now();
@@ -977,7 +1238,7 @@ impl Scheduler {
             .providers
             .iter()
             .map(|p| {
-                let (state, [rpm, tpm, rpd, tpd], in_flight, window) = {
+                let (state, [rpm, tpm, rpd, tpd], in_flight, window, [rmo, tmo]) = {
                     let mut ps = lock(&p.state);
                     ps.tick(now, utc);
                     (
@@ -985,6 +1246,7 @@ impl Scheduler {
                         ps.remaining(),
                         ps.in_flight,
                         ps.window.as_ref().map(Rate::remaining),
+                        ps.monthly_remaining(),
                     )
                 };
                 let models = p
@@ -994,6 +1256,7 @@ impl Scheduler {
                         let mut ms = lock(&m.scope);
                         ms.scope.tick(now, utc);
                         let [rpm, tpm, rpd, tpd] = ms.scope.remaining();
+                        let [rmo, tmo] = ms.scope.monthly_remaining();
                         ModelQuota {
                             id: m.id.to_string(),
                             family: m.family.clone(),
@@ -1006,6 +1269,8 @@ impl Scheduler {
                             tpm_remaining: tpm,
                             rpd_remaining: rpd,
                             tpd_remaining: tpd,
+                            requests_month_remaining: rmo,
+                            tokens_month_remaining: tmo,
                         }
                     })
                     .collect();
@@ -1020,6 +1285,8 @@ impl Scheduler {
                     rpd_remaining: rpd,
                     tpd_remaining: tpd,
                     window_remaining: window,
+                    requests_month_remaining: rmo,
+                    tokens_month_remaining: tmo,
                     models,
                 }
             })

@@ -1077,3 +1077,186 @@ fn max_tier_excludes_credit_and_paid_steps() {
         2
     );
 }
+
+// ---------------------------------------------------------------- F0-10: mensais e snapshot
+
+/// Outro `Scheduler` com o MESMO relógio (simula restart ou reload).
+fn rebuild(f: &Fx, body: &str) -> Scheduler {
+    let toml = format!(
+        "[defaults]\nestimate_chars_per_token = 1.0\nsafety_factor = 1.0\nfirst_token_timeout_ms = 100\nrequest_timeout_ms = 1000\n{body}"
+    );
+    let config = Config::from_toml_str(&toml).unwrap();
+    Scheduler::new(&config, f.clock.clone(), &|env| env != "MISSING")
+}
+
+fn quota_of(s: &Scheduler) -> QuotaSnapshot {
+    s.snapshot()
+}
+
+/// Mês UTC: 2024-07-31 23:00 (dia 19935 da época).
+fn utc_jul31_23h() -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(19_935 * DAY + 23 * 3600)
+}
+
+/// F0-10/N6: `requests_per_month` é bucket de verdade; esgotou → espera a
+/// virada do mês UTC; a virada zera.
+#[test]
+fn monthly_requests_bucket_waits_for_next_month() {
+    let f = fx_at(
+        &single("limits = { requests_per_month = 2 }", ""),
+        utc_jul31_23h(),
+    );
+    for _ in 0..2 {
+        f.reserve(10).settle(None);
+    }
+    assert_eq!(f.snap_provider("p").requests_month_remaining, Some(0));
+    // falta 1 h para 2024-08-01 00:00 UTC
+    assert!(approx(not_now(f.skip(&req(10))), 3600.0));
+    f.clock.advance(Duration::from_secs(3600));
+    assert_eq!(f.snap_provider("p").requests_month_remaining, Some(2));
+    f.only(&req(10));
+}
+
+#[test]
+fn monthly_tokens_bucket_charges_usage_and_never_fits_above_cap() {
+    let f = fx(&single("", ", limits = { tokens_per_month = 1000 }"));
+    // prompt_tokens = 0: sem recalibrar chars/token (a estimativa fica exata).
+    f.reserve(100).settle(Some(Usage {
+        prompt_tokens: 0,
+        completion_tokens: 150,
+        total_tokens: 150,
+    }));
+    assert_eq!(f.snap_model("p", "m").tokens_month_remaining, Some(850));
+    assert_eq!(f.skip(&req(1001)), Skip::NeverFits);
+    assert!(not_now(f.skip(&req(900))) > Duration::from_secs(3600));
+}
+
+const SNAP_BODY: &str = r#"
+    [[provider]]
+    id = "p"
+    base_url = "http://p"
+    auth = { kind = "none" }
+    limits = { rpm = 10, rpd = 100, requests_per_month = 1000 }
+    models = [
+      { id = "a", upstream = "a", limits = { tpm = 5000, tpd = 100000, tokens_per_month = 900000 } },
+      { id = "b", upstream = "b" },
+    ]
+    cooldown = { on_5xx_s = 20 }
+
+    [[class]]
+    id = "kax/t"
+    max_packet_tokens = 100000
+    route = [{ provider = "p", model = "a" }, { provider = "p", model = "b" }]
+"#;
+
+/// Gasta saldo em `a`, esfria `b` e recalibra o cpt de `a`.
+fn spend(f: &Fx) {
+    let p = f.pick(&req(1004));
+    f.s.reserve(&p.candidates[0]).unwrap().settle(Some(Usage {
+        prompt_tokens: 250,
+        completion_tokens: 750,
+        total_tokens: 1000,
+    }));
+    let p = f.pick(&req(10));
+    let b = p.candidates.iter().find(|c| &*c.model_id == "b").unwrap();
+    f.s.reserve(b)
+        .unwrap()
+        .fail(&UpstreamError::Server { status: 503 });
+}
+
+/// F0-10: export → restore num scheduler novo devolve buckets (incluindo os
+/// mensais), cooldown e chars/token; JSON faz round-trip.
+#[test]
+fn snapshot_round_trip_restores_buckets_cooldown_and_cpt() {
+    let f = fx(SNAP_BODY);
+    spend(&f);
+    let snap = f.s.export_state();
+    let json = serde_json::to_string(&snap).unwrap();
+    let back: BucketsSnapshot = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, snap);
+
+    let s2 = rebuild(&f, SNAP_BODY);
+    s2.restore_state(&back);
+    assert_eq!(quota_of(&s2), quota_of(&f.s));
+    let p = quota_of(&s2).providers.remove(0);
+    assert_eq!(p.rpd_remaining, Some(98));
+    assert_eq!(p.requests_month_remaining, Some(998));
+    let a = &p.models[0];
+    assert_eq!(a.tpd_remaining, Some(99_000));
+    assert_eq!(a.tokens_month_remaining, Some(899_000));
+    assert!((a.chars_per_token - 1.6).abs() < 1e-9);
+    assert!(matches!(p.models[1].state, StateView::Cooldown { .. }));
+}
+
+/// F0-10: no restore, o tempo de parede decorrido conta: RPM/TPM reabastecem,
+/// cooldown vencido some, janela diária virada zera.
+#[test]
+fn snapshot_restore_accounts_for_elapsed_wall_time() {
+    let f = fx_at(SNAP_BODY, utc(23, 59, 0));
+    spend(&f);
+    let snap = f.s.export_state();
+    assert_eq!(f.snap_provider("p").rpm_remaining, Some(8));
+
+    f.clock.advance(Duration::from_secs(120));
+    let s2 = rebuild(&f, SNAP_BODY);
+    s2.restore_state(&snap);
+    let p = quota_of(&s2).providers.remove(0);
+    assert_eq!(p.rpm_remaining, Some(10), "2 min reabastecem o RPM");
+    assert_eq!(p.rpd_remaining, Some(100), "virou o dia UTC");
+    assert_eq!(p.requests_month_remaining, Some(998), "mesmo mês");
+    assert_eq!(
+        p.models[1].state,
+        StateView::Healthy,
+        "cooldown de 20 s venceu"
+    );
+    assert_eq!(p.models[0].tpm_remaining, Some(5000));
+}
+
+/// F0-10: config mudou entre o save e o restore: escopo desconhecido é
+/// ignorado; nível acima do teto novo é cortado; bucket novo começa cheio.
+#[test]
+fn snapshot_restore_tolerates_config_changes() {
+    let f = fx(SNAP_BODY);
+    spend(&f);
+    let snap = f.s.export_state();
+    let changed = SNAP_BODY
+        .replace(
+            "limits = { rpm = 10, rpd = 100, requests_per_month = 1000 }",
+            "limits = { rpm = 5, rpd = 100, tpd = 7777 }",
+        )
+        .replace(
+            "{ id = \"b\", upstream = \"b\" },",
+            "{ id = \"c\", upstream = \"c\" },",
+        )
+        .replace(
+            "{ provider = \"p\", model = \"b\" }",
+            "{ provider = \"p\", model = \"c\" }",
+        );
+    let s2 = rebuild(&f, &changed);
+    s2.restore_state(&snap);
+    let p = quota_of(&s2).providers.remove(0);
+    assert_eq!(p.rpm_remaining, Some(5), "8 cortado no teto novo de 5");
+    assert_eq!(p.rpd_remaining, Some(98));
+    assert_eq!(p.tpd_remaining, Some(7777), "bucket novo começa cheio");
+    assert_eq!(p.requests_month_remaining, None, "bucket removido");
+    assert_eq!(p.models[1].id, "c");
+    assert_eq!(p.models[1].state, StateView::Healthy);
+}
+
+/// F0-10: `Disabled` não persiste (é "até reload"); snapshot vazio não quebra.
+#[test]
+fn snapshot_does_not_carry_disabled_state() {
+    let f = fx(SNAP_BODY);
+    f.reserve_first().fail(&UpstreamError::Auth { status: 401 });
+    let s2 = rebuild(&f, SNAP_BODY);
+    s2.restore_state(&f.s.export_state());
+    assert_eq!(s2.provider_state("p"), Some(ProviderState::Healthy));
+    s2.restore_state(&BucketsSnapshot::default());
+}
+
+impl Fx {
+    fn reserve_first(&self) -> Reservation {
+        let p = self.pick(&req(10));
+        self.s.reserve(&p.candidates[0]).unwrap()
+    }
+}

@@ -15,6 +15,8 @@ use wiremock::ResponseTemplate;
 pub struct Gateway {
     pub base: String,
     pub http: reqwest::Client,
+    /// Mesmo estado que o servidor usa (reload, snapshot).
+    pub state: AppState,
 }
 
 impl Gateway {
@@ -24,13 +26,46 @@ impl Gateway {
         let state = AppState::new(deps).expect("AppState");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(server::serve(listener, state, std::future::pending()));
+        tokio::spawn(server::serve(
+            listener,
+            state.clone(),
+            std::future::pending(),
+        ));
         server::install_crypto_provider();
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
             .unwrap();
-        Self { base, http }
+        Self { base, http, state }
+    }
+
+    pub async fn quota(&self) -> Value {
+        self.http
+            .get(format!("{}/quota", self.base))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
+
+    pub async fn class_ids(&self) -> Vec<String> {
+        let v: Value = self
+            .http
+            .get(format!("{}/v1/models", self.base))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap().to_owned())
+            .collect()
     }
 
     /// `POST /v1/chat/completions` com streaming; devolve status, provider e SSE lido até o fim.

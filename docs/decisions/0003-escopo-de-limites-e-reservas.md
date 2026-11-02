@@ -74,4 +74,4 @@ Consequência: um provider com upstream inteiro fora do ar responde com 5xx a ca
 - O `providers.toml` mudou de formato (`models` virou lista de tabelas). Configs antigas não parseiam (`deny_unknown_fields`), o que é intencional.
 - Um modelo pode estar em cooldown com o provider saudável; `/quota` mostra os dois escopos.
 - O saldo de TPM pode ficar negativo após um `settle` acima da reserva, o que freia o escopo naturalmente.
-- `tokens_per_month` continua informativo até existir snapshot persistente dos buckets.
+- Desde a F0-10 os buckets (inclusive os mensais) persistem em `state/buckets.json` e atravessam o hot-reload: ver ADR 0005.
