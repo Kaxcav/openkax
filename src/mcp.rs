@@ -1,11 +1,12 @@
 //! Servidor MCP `kax-workers` (`openkax mcp`, stdio) — **Fase 2**.
 //!
 //! Tools (PLANO_MESTRE §3.6): `delegate`, `delegate_batch`, `status`, `quota`,
-//! `report`. Na etapa F2-1 (CONTRACT) os handlers só validam a entrada e
-//! devolvem erro estruturado `not_implemented`; `quota` já devolve o snapshot
-//! real do scheduler. A execução (worktree, operário, verify) entra em F2-2+.
+//! `report`. `delegate` executa a tarefa de ponta a ponta (F2-5, ver `run`);
+//! `quota` devolve o snapshot do scheduler; as demais validam a entrada e
+//! devolvem `not_implemented` até a etapa que as liga.
 
 mod packet;
+mod run;
 mod types;
 
 use rmcp::{
@@ -13,11 +14,14 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     tool, tool_handler, tool_router,
 };
+use std::path::Path;
+
 use serde_json::json;
 
 use crate::server::AppState;
 
 pub use packet::*;
+pub use run::run_task;
 pub use types::*;
 
 /// Etapa em que os handlers estão (vira o campo `stage` dos erros).
@@ -69,7 +73,8 @@ impl KaxWorkers {
     )]
     async fn delegate(&self, Parameters(p): Parameters<DelegateParams>) -> Result<String, String> {
         p.validate().map_err(invalid)?;
-        Err(not_implemented("delegate"))
+        let result = run_task(&self.app, Path::new(&p.repo), &p.base_ref, &p.task).await;
+        serde_json::to_string(&result).map_err(|e| tool_error("internal", &e.to_string()))
     }
 
     #[tool(

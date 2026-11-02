@@ -216,6 +216,13 @@ impl AppState {
         &self.hub.ledger
     }
 
+    /// `(max_packet_tokens, chars_per_token)` da classe, para montar o pacote do operário.
+    pub fn packet_limits(&self, class: &str) -> Option<(u32, f64)> {
+        let v = self.view();
+        let c = v.config().class(class)?;
+        Some((c.max_packet_tokens, v.config().defaults.estimate_chars_per_token))
+    }
+
     /// Troca a config a quente (F0-10). Buckets, cooldowns e chars/token passam
     /// para a geração nova casando por id; `Disabled` volta a valer só se
     /// acontecer de novo (é "até reload"). Requests em voo terminam na antiga.
@@ -434,6 +441,8 @@ struct Meta {
     fallbacks: u32,
     pinned: bool,
     reasoning: bool,
+    /// Providers que o `dispatch` pula (retry do MCP, F2-5). Vazio nas rotas HTTP.
+    skip_providers: Vec<String>,
 }
 
 impl Meta {
@@ -510,6 +519,7 @@ async fn chat_completions(
         fallbacks: 0,
         pinned: false,
         reasoning: false,
+        skip_providers: Vec::new(),
     };
     if !req.model.starts_with("kax/") {
         meta.record(&st, None, None, None, Outcome::Rejected);
@@ -520,6 +530,39 @@ async fn chat_completions(
         );
     }
     dispatch(&st, &headers, &req, Wire::OpenAi, meta).await
+}
+
+impl AppState {
+    /// Despacha uma request não-streaming pelo mesmo caminho do
+    /// `/v1/chat/completions` (pick, reserva, fallback, ledger), pulando os
+    /// providers em `skip_providers`. Usado pelo MCP para o retry no próximo
+    /// candidato da rota (F2-5). A resposta tem o mesmo formato do endpoint HTTP.
+    pub async fn complete(
+        &self,
+        mut req: ChatCompletionRequest,
+        skip_providers: &[String],
+    ) -> Response {
+        req.stream = Some(false);
+        let meta = Meta {
+            route: req.model.clone(),
+            est_in: 0,
+            started: Instant::now(),
+            fallbacks: 0,
+            pinned: false,
+            reasoning: false,
+            skip_providers: skip_providers.to_vec(),
+        };
+        let st = self.view();
+        if !req.model.starts_with("kax/") {
+            meta.record(&st, None, None, None, Outcome::Rejected);
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "model_not_found",
+                "esta rota aceita apenas classes kax/* (veja /v1/models)",
+            );
+        }
+        dispatch(&st, &HeaderMap::new(), &req, Wire::OpenAi, meta).await
+    }
 }
 
 /// Roteia pelo scheduler com fallback pré-1º-token. `req` é sempre OpenAI, com a
@@ -550,6 +593,9 @@ async fn dispatch(
     for cand in &pick.candidates {
         if fault.is_some() && attempts_after_fault >= 1 {
             break;
+        }
+        if meta.skip_providers.iter().any(|p| **p == *cand.provider_id) {
+            continue;
         }
         let mut res = match st.scheduler().reserve(cand) {
             Ok(r) => r,

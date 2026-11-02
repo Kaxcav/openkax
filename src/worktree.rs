@@ -215,6 +215,43 @@ pub fn remove(repo: &Path, task_id: &str) -> Result<(), WorktreeError> {
     Ok(())
 }
 
+/// Descarta alterações não commitadas (tracked e novas) do worktree, para a
+/// próxima tentativa partir do `base_ref`.
+pub fn reset(path: &Path) -> Result<(), WorktreeError> {
+    git(path, &["reset", "--hard", "-q", "HEAD"])?;
+    git(path, &["clean", "-fdq"])?;
+    Ok(())
+}
+
+/// Diff do que está no índice contra o HEAD do worktree (após `git add -A`).
+pub fn staged_diff(path: &Path) -> Result<String, WorktreeError> {
+    git(path, &["add", "-A"])?;
+    git(path, &["diff", "--cached", "HEAD"])
+}
+
+/// Commita tudo que está no worktree como `message` (identidade fixa do
+/// openkax, sem depender da config git do usuário nem de assinatura).
+pub fn commit_all(path: &Path, message: &str) -> Result<(), WorktreeError> {
+    git(path, &["add", "-A"])?;
+    git(
+        path,
+        &[
+            "-c",
+            "user.name=openkax",
+            "-c",
+            "user.email=openkax@localhost",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--no-verify",
+            "-m",
+            message,
+        ],
+    )?;
+    Ok(())
+}
+
 /// Tarefa abandonada: worktree sem alterações e sem commits além do HEAD do repo.
 fn is_abandoned(root: &Path, wt: &Worktree) -> bool {
     let clean = git(&wt.path, &["status", "--porcelain"]).map(|s| s.trim().is_empty());

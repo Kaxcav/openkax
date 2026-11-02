@@ -58,6 +58,20 @@ respondem `not_implemented`. Execução entra em F2-2 em diante.
   resposta inteira se qualquer path for absoluto, tiver `..` ou não estiver na
   lista `write` (`out_of_scope`). Barras invertidas são normalizadas antes.
 
+## Execução e retry (F2-5)
+
+- **Despacho único:** `run_task` chama `AppState::complete`, que usa o mesmo
+  `dispatch` do `/v1/chat/completions` (pick, reserva, settle, ledger de request);
+  o retry só acrescenta a lista de providers a pular. Não há fallback duplicado.
+- **Tentativas:** falha de parse, de `git apply` ou de verify → `git reset --hard`
+  + `clean` no worktree e nova tentativa no próximo candidato, com o log truncado
+  anexado ao pacote. Esgotou, ou gateway sem candidato/pacote grande → `needs_lead`
+  (o status `rejected` não é produzido; worktree sempre preservado).
+- **Aceita:** commit `kax(<id>): <objective>` no worktree (identidade `openkax`),
+  branch `kax/<id>` para o lead integrar. Ledger `kind:"task"` por tarefa.
+- `delegate` está ligada; `delegate_batch`, `status` e `report` seguem
+  `not_implemented`.
+
 ## Consequências
 
 - O lead ganha paralelismo barato, mas toda saída passa por verify antes de
