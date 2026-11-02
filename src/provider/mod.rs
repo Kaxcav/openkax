@@ -861,9 +861,9 @@ pub fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-/// `reqwest::Client` com rustls+ring (instala o crypto provider antes).
-/// Pool enxuto (ADR 0002): conexão ociosa fecha em 30 s e no máximo 2 por host,
-/// para a memória privada voltar ao patamar ocioso depois de uma rajada.
+/// Client do passthrough `claude-*` (F1-6): sem timeout total, porque stream de
+/// Opus/Sonnet passa fácil de `request_timeout_ms`. Só `connect_timeout` e
+/// `read_timeout` (inatividade entre chunks). Mesmo pool enxuto do client dos providers.
 pub fn build_passthrough_client() -> reqwest::Result<reqwest::Client> {
     install_crypto_provider();
     reqwest::Client::builder()
@@ -874,6 +874,9 @@ pub fn build_passthrough_client() -> reqwest::Result<reqwest::Client> {
         .build()
 }
 
+/// `reqwest::Client` com rustls+ring (instala o crypto provider antes).
+/// Pool enxuto (ADR 0002): conexão ociosa fecha em 30 s e no máximo 2 por host,
+/// para a memória privada voltar ao patamar ocioso depois de uma rajada.
 pub fn build_http_client(timeout: Duration) -> reqwest::Result<reqwest::Client> {
     install_crypto_provider();
     reqwest::Client::builder()
