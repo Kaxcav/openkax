@@ -34,4 +34,10 @@ Entradas mais recentes no fim. Formato e regras em `RUNBOOK.md`.
 - descartado: mais de 4 `stop_sequences` em provider com limite. É raro, e cortar calado mudaria o comportamento pedido; o upstream responde o erro.
 - CI: o `080ab81` falhou no clippy porque o CI usa o stable corrente (1.99.1) e a nuvem está no 1.97, onde o lint `chunks_exact_to_as_chunks` não existe. Corrigido no `bcaf966`, CI verde em Linux e Windows (run 41520117016). **Clippy local verde não garante o do CI: confira o CI antes de dar a tarefa por encerrada.**
 
-## 2026-11-02 18:11 — F1-3 stream — EM ANDAMENTO
+## 2026-11-02 18:11 — F1-3 stream — FEITO
+- entrou: `src/translate/anthropic/stream.rs` (`OpenAiToAnthropicStream`, `collect_response`), `encode_tool_use_id`. Os 16 testes `#[ignore = "F1-3"]` agora rodam, com outros 21 de stream. Ainda sem rota: isso é a F1-4.
+- testes: 180 unitários + 32 de integração verdes, clippy e fmt limpos; 29 de aceite seguem `#[ignore]` (F1-4..F1-7). CI run 41528418314 verde em Linux e Windows.
+- revisão independente, corrigidos: chamadas paralelas sem `id` se fundiam em `{"p":1}{"q":2}` (`ToolIndexer`, em `server.rs`, então também vale para `/v1/chat/completions`); `arguments` como objeto sumia; `arguments: "null"` saía como delta no stream e `{}` no não-stream; delta de tool vazio fechava o texto aberto. Cinco lacunas de teste achadas por mutação, fechadas.
+- decisão nova, no ADR 0006: chamada que nunca recebe `name` some; `finish_reason: "tool_calls"` sem tool emitida vira `end_turn`; `usage` zerado vale como não informado.
+- descartado: `stop` ou EOF com argumentos truncados saem como `tool_use`. O cliente recusa o JSON inválido e devolve o erro ao modelo, e inventar `max_tokens` diria uma causa que não sabemos. Assinatura depois de o bloco abrir e nome em pedaços: o `id` e o `name` já saíram, e nenhum provider conhecido faz isso.
+- só hipótese, sem provider real, foi para o roteiro da F1-8: Gemini com `id` vazio em chamadas paralelas, `arguments` como objeto, `id` fora do padrão da Anthropic (`functions.Read:0`) se a sessão migrar para `claude-*`.

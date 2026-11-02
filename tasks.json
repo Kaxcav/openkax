@@ -176,11 +176,11 @@
       "id": "F1-3",
       "title": "Stream OpenAI SSE → eventos Anthropic + agregação não-stream",
       "owner": "lead",
-      "status": "todo",
+      "status": "done",
       "depends": [
         "F1-1"
       ],
-      "note": "Inclui encode_tool_use_id (assinatura no id, em hex) e finish_reason \"error\" como evento error."
+      "note": "stream.rs: OpenAiToAnthropicStream e collect_response; encode_tool_use_id em mod.rs; ToolIndexer separa chamadas paralelas sem id. 180 unitários + 32 de integração; CI run 41528418314 verde (ubuntu-latest e windows-latest)."
     },
     {
       "id": "F1-4",
@@ -233,7 +233,7 @@
         "F1-6",
         "F1-7"
       ],
-      "note": "Roteiro manual inclui: rodada dupla real com Gemini (assinatura), $schema/additionalProperties nas tools do Claude Code, captura de request real para a fixture. Conferir também com provider real (hipóteses da revisão da F1-2): Codestral com `user` depois de `tool` e com `assistant` no fim (prefill); Gemini com parallel_tool_calls; quais providers precisam de strip_images (nenhum ligado ainda)."
+      "note": "Roteiro manual inclui: rodada dupla real com Gemini (assinatura), $schema/additionalProperties nas tools do Claude Code, captura de request real para a fixture. Conferir também com provider real (hipóteses da revisão da F1-2): Codestral com `user` depois de `tool` e com `assistant` no fim (prefill); Gemini com parallel_tool_calls; quais providers precisam de strip_images (nenhum ligado ainda). Hipóteses da revisão da F1-3: Gemini com chamadas paralelas de id vazio (o ToolIndexer agora separa); arguments como objeto; id fora de ^[a-zA-Z0-9_-]+$ (ex.: functions.Read:0), que a Anthropic recusaria se a sessão migrar para claude-*."
     },
     {
       "id": "F2-1",
