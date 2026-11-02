@@ -40,8 +40,11 @@ fn main() -> ExitCode {
 }
 
 fn run_serve() -> ExitCode {
+    // Threads de blocking (DNS, fs) limitadas e soltas após 10 s ociosas (ADR 0002).
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
+        .max_blocking_threads(4)
+        .thread_keep_alive(std::time::Duration::from_secs(10))
         .enable_all()
         .build()
     {
