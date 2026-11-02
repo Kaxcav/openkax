@@ -1,5 +1,5 @@
 {
-  "phase": 1,
+  "phase": 0,
   "updated": "2026-11-02",
   "tasks": [
     {
@@ -238,13 +238,10 @@
     },
     {
       "id": "F2-1",
-      "title": "CONTRACT: openkax mcp (stdio, rmcp), schemas das tools, TaskPacket/TaskResult, .kax/verify.toml, ADR 0007",
-      "owner": "fabrica",
-      "status": "todo",
-      "depends": [
-        "F1-8"
-      ],
-      "note": "Frente da fábrica, na branch Kaxcav/openkax-fase-2 (docs/noturno/FABRICA.md nessa branch). Não é do turno na nuvem."
+      "title": "CONTRACT do MCP kax-workers: openkax mcp (rmcp stdio), 5 tools com schema, tipos serde, schema de .kax/verify.toml, ADR 0007 (proposta)",
+      "owner": "lead",
+      "status": "done",
+      "note": "101 unitários (+7: 4 types, 3 verify) + 3 de integração mcp_contract (+3 #[ignore] F2-3/F2-4/F2-5 falhando de propósito). Handlers validam e devolvem not_implemented; quota devolve o snapshot do scheduler"
     },
     {
       "id": "F2-2",

@@ -19,24 +19,62 @@ fn main() -> ExitCode {
     openkax::provider::install_crypto_provider();
     // .env só no dev; ausência não é erro.
     let _ = dotenvy::dotenv();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("OPENKAX_LOG")
-                .unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    let sub = std::env::args().nth(1);
+    let filter = tracing_subscriber::EnvFilter::try_from_env("OPENKAX_LOG")
+        .unwrap_or_else(|_| "info".into());
+    if sub.as_deref() == Some("mcp") {
+        // stdout é o canal do protocolo MCP: logs só em stderr.
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(filter).init();
+    }
 
-    match std::env::args().nth(1).as_deref() {
+    match sub.as_deref() {
         None | Some("serve") => run_serve(),
-        Some("mcp") => {
-            eprintln!("openkax mcp: Fase 2");
-            ExitCode::from(2)
-        }
+        Some("mcp") => run_mcp(),
         Some(other) => {
             eprintln!("subcomando desconhecido: {other}\nuso: openkax [serve|mcp]");
             ExitCode::from(2)
         }
     }
+}
+
+/// `openkax mcp`: servidor MCP stdio. stdout é o canal do protocolo — logs vão
+/// para stderr.
+fn run_mcp() -> ExitCode {
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(4)
+        .thread_keep_alive(std::time::Duration::from_secs(10))
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("falha ao criar runtime: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match rt.block_on(mcp()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn mcp() -> Result<(), Box<dyn std::error::Error>> {
+    let path = PathBuf::from(
+        std::env::var_os("OPENKAX_CONFIG").unwrap_or_else(|| "providers.toml".into()),
+    );
+    let config = Config::load(&path)?;
+    let secrets = Secrets::from_env(&config);
+    let state = AppState::new(Deps::new(config, secrets))?;
+    openkax::mcp::KaxWorkers::new(state).serve_stdio().await
 }
 
 fn run_serve() -> ExitCode {
