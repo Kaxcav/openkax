@@ -2,7 +2,7 @@
 //!
 //! Define, por repo, os comandos de verificação por linguagem/glob, o timeout
 //! e o teto do log devolvido ao lead. Nada roda fora do worktree da tarefa;
-//! o runner entra na etapa F2-3. Aqui só há struct, parser e validação.
+//! o runner (apply + verify) fica no fim deste módulo.
 
 use std::path::Path;
 
@@ -108,6 +108,251 @@ impl VerifyConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Runner (F2-4): aplica o diff e executa o verify sempre dentro do worktree.
+// ---------------------------------------------------------------------------
+
+use std::io::Write;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+/// Falhas que impedem o verify de rodar (não confundir com comando que falha).
+#[derive(Debug, thiserror::Error)]
+pub enum RunError {
+    #[error("{0} não é um worktree git")]
+    NotAWorktree(String),
+    #[error("diff rejeitado pelo git apply: {log}")]
+    ApplyRejected { log: String },
+    #[error("expect inválido {0:?}: use \"exit <N>\"")]
+    BadExpect(String),
+    #[error("erro de E/S: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Resultado de um comando de verify.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandOutcome {
+    pub command: String,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub passed: bool,
+    /// stdout+stderr, no máximo `max_log_bytes` (o fim é preservado).
+    pub log: String,
+    pub truncated: bool,
+}
+
+/// Resultado do verify inteiro; para no primeiro comando que falha.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifyReport {
+    pub passed: bool,
+    pub outcomes: Vec<CommandOutcome>,
+}
+
+/// Limites de execução.
+#[derive(Debug, Clone, Copy)]
+pub struct RunOptions {
+    pub timeout: Duration,
+    pub max_log_bytes: usize,
+}
+
+impl RunOptions {
+    pub fn from_config(cfg: &VerifyConfig) -> Self {
+        Self {
+            timeout: Duration::from_secs(cfg.timeout_s),
+            max_log_bytes: cfg.max_log_bytes,
+        }
+    }
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_S),
+            max_log_bytes: DEFAULT_MAX_LOG_BYTES,
+        }
+    }
+}
+
+/// Interpreta `expect` (`exit N`; vazio = `exit 0`).
+pub fn parse_expect(expect: &str) -> Result<i32, RunError> {
+    let e = expect.trim();
+    if e.is_empty() {
+        return Ok(0);
+    }
+    e.strip_prefix("exit")
+        .map(str::trim)
+        .and_then(|n| n.parse::<i32>().ok())
+        .ok_or_else(|| RunError::BadExpect(expect.to_string()))
+}
+
+/// Mantém só o fim de `bytes` (até `max`), respeitando limites UTF-8.
+pub fn truncate_tail(bytes: &[u8], max: usize) -> (String, bool) {
+    if bytes.len() <= max {
+        return (String::from_utf8_lossy(bytes).into_owned(), false);
+    }
+    let mut tail = &bytes[bytes.len() - max..];
+    // Descarta bytes de continuação do caractere cortado ao meio.
+    while let Some((&b, rest)) = tail.split_first() {
+        if b & 0xC0 == 0x80 {
+            tail = rest;
+        } else {
+            break;
+        }
+    }
+    (String::from_utf8_lossy(tail).into_owned(), true)
+}
+
+fn ensure_worktree(dir: &Path) -> Result<(), RunError> {
+    if dir.is_dir() && dir.join(".git").exists() {
+        Ok(())
+    } else {
+        Err(RunError::NotAWorktree(dir.display().to_string()))
+    }
+}
+
+/// Aplica o diff do operário no índice e na árvore do worktree.
+/// O diff vai por stdin; falha de apply vira `ApplyRejected` com o log do git.
+pub fn apply_diff(worktree: &Path, diff: &str, max_log_bytes: usize) -> Result<(), RunError> {
+    ensure_worktree(worktree)?;
+    let mut child = Command::new("git")
+        .args(["apply", "--index", "--whitespace=nowarn", "-"])
+        .current_dir(worktree)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        // Pipe quebrado aparece no status/stderr do git.
+        let _ = stdin.write_all(diff.as_bytes());
+    }
+    let out = child.wait_with_output()?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let mut all = out.stdout;
+    all.extend_from_slice(&out.stderr);
+    let (log, _) = truncate_tail(&all, max_log_bytes);
+    Err(RunError::ApplyRejected { log })
+}
+
+/// Executa os comandos em ordem no worktree; para no primeiro que falhar.
+/// Os comandos vêm só do pacote/verify.toml, nunca de texto do operário.
+pub fn run_verify(
+    worktree: &Path,
+    commands: &[String],
+    expect: &str,
+    opts: RunOptions,
+) -> Result<VerifyReport, RunError> {
+    ensure_worktree(worktree)?;
+    let want = parse_expect(expect)?;
+    let mut outcomes = Vec::new();
+    for cmd in commands {
+        let o = run_command(worktree, cmd, want, opts)?;
+        let ok = o.passed;
+        outcomes.push(o);
+        if !ok {
+            return Ok(VerifyReport {
+                passed: false,
+                outcomes,
+            });
+        }
+    }
+    Ok(VerifyReport {
+        passed: true,
+        outcomes,
+    })
+}
+
+static LOG_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn shell_command(cmd: &str) -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut c = Command::new("cmd");
+        c.arg("/C").raw_arg(cmd);
+        c
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::process::CommandExt;
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(cmd).process_group(0);
+        c
+    }
+}
+
+/// Mata o processo e todos os descendentes.
+fn kill_tree(child: &mut std::process::Child) {
+    let pid = child.id().to_string();
+    #[cfg(windows)]
+    let _ = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    #[cfg(not(windows))]
+    let _ = Command::new("kill")
+        .args(["-KILL", "--", &format!("-{pid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = child.kill();
+}
+
+fn run_command(
+    worktree: &Path,
+    cmd: &str,
+    want: i32,
+    opts: RunOptions,
+) -> Result<CommandOutcome, RunError> {
+    // stdout e stderr no mesmo arquivo temporário preservam a ordem de saída.
+    let log_path = std::env::temp_dir().join(format!(
+        "openkax-verify-{}-{}.log",
+        std::process::id(),
+        LOG_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let log_file = std::fs::File::create(&log_path)?;
+    let spawned = shell_command(cmd)
+        .current_dir(worktree)
+        .stdin(Stdio::null())
+        .stdout(log_file.try_clone()?)
+        .stderr(log_file)
+        .spawn();
+    let mut child = match spawned {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_file(&log_path);
+            return Err(e.into());
+        }
+    };
+    let start = Instant::now();
+    let (status, timed_out) = loop {
+        if let Some(st) = child.try_wait()? {
+            break (Some(st), false);
+        }
+        if start.elapsed() >= opts.timeout {
+            kill_tree(&mut child);
+            let _ = child.wait();
+            break (None, true);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let bytes = std::fs::read(&log_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&log_path);
+    let (log, truncated) = truncate_tail(&bytes, opts.max_log_bytes);
+    let exit_code = status.and_then(|s| s.code());
+    Ok(CommandOutcome {
+        command: cmd.to_string(),
+        exit_code,
+        timed_out,
+        passed: !timed_out && exit_code == Some(want),
+        log,
+        truncated,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +383,171 @@ mod tests {
             Err(VerifyConfigError::Invalid(_))
         ));
         assert!(VerifyConfig::parse("timeout_s = 0").is_err());
+    }
+}
+
+#[cfg(test)]
+mod runner_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let st = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?}");
+    }
+
+    fn repo() -> TempDir {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path();
+        git(p, &["init", "-q"]);
+        git(p, &["config", "user.email", "t@t"]);
+        git(p, &["config", "user.name", "t"]);
+        git(p, &["config", "core.autocrlf", "false"]);
+        std::fs::write(p.join("a.txt"), "old\n").unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "init"]);
+        d
+    }
+
+    fn diff_to(content: &str) -> String {
+        format!(
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+{content}\n"
+        )
+    }
+
+    fn cmds(c: &[&str]) -> Vec<String> {
+        c.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[cfg(windows)]
+    const SLEEP: &str = "ping -n 30 127.0.0.1 > nul";
+    #[cfg(not(windows))]
+    const SLEEP: &str = "sleep 30";
+
+    #[test]
+    fn diff_that_passes_verify() {
+        let d = repo();
+        apply_diff(d.path(), &diff_to("hello"), 4096).unwrap();
+        let r = run_verify(
+            d.path(),
+            &cmds(&["git grep -q hello -- a.txt"]),
+            "exit 0",
+            RunOptions::default(),
+        )
+        .unwrap();
+        assert!(r.passed, "{r:?}");
+    }
+
+    #[test]
+    fn diff_that_breaks_verify() {
+        let d = repo();
+        apply_diff(d.path(), &diff_to("bad"), 4096).unwrap();
+        let r = run_verify(
+            d.path(),
+            &cmds(&["git grep -q hello -- a.txt", "git --version"]),
+            "exit 0",
+            RunOptions::default(),
+        )
+        .unwrap();
+        assert!(!r.passed);
+        assert_eq!(r.outcomes.len(), 1, "para no primeiro que falha");
+        assert_eq!(r.outcomes[0].exit_code, Some(1));
+    }
+
+    #[test]
+    fn expect_other_exit_code() {
+        let d = repo();
+        let r = run_verify(
+            d.path(),
+            &cmds(&["exit 3"]),
+            "exit 3",
+            RunOptions::default(),
+        )
+        .unwrap();
+        assert!(r.passed);
+        assert!(matches!(
+            run_verify(
+                d.path(),
+                &cmds(&["exit 0"]),
+                "talvez",
+                RunOptions::default()
+            ),
+            Err(RunError::BadExpect(_))
+        ));
+    }
+
+    #[test]
+    fn timeout_kills_command() {
+        let d = repo();
+        let opts = RunOptions {
+            timeout: Duration::from_millis(500),
+            max_log_bytes: 4096,
+        };
+        let t = Instant::now();
+        let r = run_verify(d.path(), &cmds(&[SLEEP]), "exit 0", opts).unwrap();
+        assert!(t.elapsed() < Duration::from_secs(20), "não esperou o sleep");
+        assert!(!r.passed);
+        assert!(r.outcomes[0].timed_out);
+    }
+
+    #[test]
+    fn log_truncation_keeps_the_end() {
+        let d = repo();
+        #[cfg(windows)]
+        let cmd = "for /L %i in (1,1,2000) do @echo line%i";
+        #[cfg(not(windows))]
+        let cmd = "for i in $(seq 1 2000); do echo line$i; done";
+        let opts = RunOptions {
+            timeout: Duration::from_secs(60),
+            max_log_bytes: 100,
+        };
+        let r = run_verify(d.path(), &cmds(&[cmd]), "exit 0", opts).unwrap();
+        let o = &r.outcomes[0];
+        assert!(o.truncated);
+        assert!(o.log.len() <= 100);
+        assert!(o.log.trim_end().ends_with("line2000"), "{:?}", o.log);
+    }
+
+    #[test]
+    fn truncate_tail_respects_utf8() {
+        let (s, t) = truncate_tail("aéééé".as_bytes(), 4);
+        assert!(t);
+        assert_eq!(s, "éé");
+        assert_eq!(truncate_tail(b"abc", 10), ("abc".to_string(), false));
+    }
+
+    #[test]
+    fn apply_that_does_not_apply_is_rejected() {
+        let d = repo();
+        let bad =
+            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-nao existe\n+x\n";
+        match apply_diff(d.path(), bad, 4096) {
+            Err(RunError::ApplyRejected { log }) => assert!(!log.is_empty()),
+            other => panic!("esperava ApplyRejected, veio {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("a.txt")).unwrap(),
+            "old\n"
+        );
+    }
+
+    #[test]
+    fn refuses_non_worktree_dir() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            run_verify(
+                d.path(),
+                &cmds(&["git --version"]),
+                "exit 0",
+                RunOptions::default()
+            ),
+            Err(RunError::NotAWorktree(_))
+        ));
     }
 }

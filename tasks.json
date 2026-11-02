@@ -259,14 +259,10 @@
     },
     {
       "id": "F2-4",
-      "title": "Aplicar diff no worktree e rodar accept.verify com timeout",
-      "owner": "fabrica",
-      "status": "todo",
-      "depends": [
-        "F2-2",
-        "F2-3"
-      ],
-      "note": "Frente da fábrica, na branch Kaxcav/openkax-fase-2 (docs/noturno/FABRICA.md nessa branch). Não é do turno na nuvem."
+      "title": "Aplicar diff e verificar no worktree: apply_diff (git apply --index) + run_verify em src/verify.rs",
+      "owner": "lead",
+      "status": "done",
+      "note": "128 unitários (+8 de runner com repo tempfile) + 3 mcp_contract (+3 #[ignore] seguem). Timeout mata a árvore (taskkill /T no Windows, kill -KILL do grupo no Unix); log mantém o fim. Seleção de comandos por glob do verify.toml ainda não ligada ao runner"
     },
     {
       "id": "F2-5",
