@@ -37,6 +37,14 @@ ou via `[aliases]` no `providers.toml`:
 "claude-haiku-*" = "kax/summarizer"
 ```
 
+## Fase 2 — como usar o MCP `kax-workers`
+- Registrar: `claude mcp add kax-workers -- <caminho>\openkax.exe mcp` (stdio; `OPENKAX_CONFIG` aponta o `providers.toml`).
+- Tools: `delegate`, `delegate_batch` (background, `parallelism` 4, máx. 16), `status(batch_id)`, `quota`, `report(day|week|month)`.
+- Cada tarefa roda num worktree `.kax/wt/<id>`; aceita → branch `kax/<id>` para integrar. Recusa/esgotou → `needs_lead` (você faz).
+- Verify: comandos de `accept.verify`; `.kax/verify.toml` ajusta só `timeout_s`/`max_log_bytes` (ver `.kax/verify.toml.example`).
+- Ledger `kind:"task"` em `%LOCALAPPDATA%\OpenKax\ledger`; limpeza: `openkax clean [--repo <path>] [--all]`.
+- Aceite manual: `docs/smoke/fase-2-aceite.md`; decisão: ADR 0007.
+
 ## Ambientes (ver ADR 0001)
 Dois ambientes de dev; descubra em qual está (`uname`/plataforma) antes de propor comandos.
 - **Notebook (WSL2 Ubuntu)**: repo em `~/openkax` (ext4). Comandos **bash em Linux**, nunca PowerShell. Tem WDAC em modo enforce: **nenhum `.exe` não assinado roda no host**; rode o binário Linux dentro do WSL (`127.0.0.1:8000`) — clientes no Windows alcançam via `localhost:8000`.
