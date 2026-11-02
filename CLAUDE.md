@@ -14,7 +14,7 @@ Modo B (MCP com pacote enxuto) é o principal. Modo A (rewrite de modelo via `AN
 ## Fase atual
 **Fase 0 — Core do gateway.** Critério de saída: 4 testes de fallback com `wiremock` passando (429→próximo; timeout 1º token→próximo; erro pós-1º-token→encerra limpo; TPM insuficiente→provider pulado sem request), Continue/Cline funcionando via classes, binário < 8 MB.
 Não iniciar Fase 1 antes disso. Atualize esta seção ao mudar de fase.
-Progresso (2026-11-02): scheduler/dispatcher/ledger + providers de cauda (ADR 0003/0004); 13 testes de integração wiremock passando; smoke real pelo gateway feito (docs/smoke/2026-11-02-f0-14.md); release Linux 3,47 MB. Falta: hot-reload + snapshot dos buckets, IDs Groq/GitHub/Cloudflare, chave Vercel, WindowsPlatform + CI `.exe`, aceite com Continue/Cline. Ver `tasks.json`.
+Progresso (2026-11-02): scheduler/dispatcher/ledger + providers de cauda (ADR 0003/0004); cooldown por tipo de erro (F0-17); timeout de 1º token por modelo (F0-18); Cohere sem raciocínio + `ascii_json` (F0-19); rotas F0-20; Groq/Cloudflare habilitados, 410 e headers IETF (F0-21); hot-reload + snapshot dos buckets (F0-10, ADR 0005); WindowsPlatform + CI ubuntu/windows com artefato `.exe` (F0-11). Testes: 94 unitários + 19 de integração (Windows e Linux). Release Windows local 2,94 MiB, working set ocioso 8,29 MiB. Falta: aceite com Continue/Cline (F0-12, usuário) e a decisão F0-22 (cartão na Vercel; remover o GitHub Models aposentado). Ver `tasks.json`.
 
 ## Ambientes (ver ADR 0001)
 Dois ambientes de dev; descubra em qual está (`uname`/plataforma) antes de propor comandos.
