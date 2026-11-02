@@ -1,0 +1,18 @@
+{
+  "phase": 0,
+  "updated": "2026-11-02",
+  "tasks": [
+    { "id": "F0-01", "title": "Esqueleto do crate, Cargo.toml e perfil release", "owner": "lead", "status": "done" },
+    { "id": "F0-02", "title": "Módulos com tipos públicos (CONTRACT) + trait Platform (Unix)", "owner": "lead", "status": "done" },
+    { "id": "F0-03", "title": "providers.toml (§3.2 + classes §1.1) e parser com round-trip", "owner": "lead", "status": "done" },
+    { "id": "F0-04", "title": "Testes de fallback wiremock (falhando no CONTRACT)", "owner": "lead", "status": "done" },
+    { "id": "F0-05", "title": "Plano do scheduler", "owner": "lead", "status": "awaiting_approval" },
+    { "id": "F0-06", "title": "Scheduler: Clock, buckets, reserva/reconciliação, estados, pick", "owner": "lead", "status": "todo", "blocked_by": ["F0-05"] },
+    { "id": "F0-07", "title": "Provider: classificação de erro, is_first_token, start_stream SSE", "owner": "lead", "status": "todo", "blocked_by": ["F0-05"] },
+    { "id": "F0-08", "title": "Dispatcher /v1/chat/completions (stream e não-stream) + 429 Retry-After", "owner": "lead", "status": "todo", "blocked_by": ["F0-06", "F0-07"] },
+    { "id": "F0-09", "title": "Ledger writer (mpsc + task, rotação diária)", "owner": "lead", "status": "todo" },
+    { "id": "F0-10", "title": "/v1/models, /quota, hot-reload do providers.toml", "owner": "lead", "status": "todo" },
+    { "id": "F0-11", "title": "WindowsPlatform + workflow CI windows-latest (artefato .exe, tamanho)", "owner": "lead", "status": "todo" },
+    { "id": "F0-12", "title": "Aceite manual: Continue/Cline em kax/coder-fast e kax/coder-smart; RSS ocioso", "owner": "user", "status": "todo", "blocked_by": ["F0-08"] }
+  ]
+}

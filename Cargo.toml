@@ -1,0 +1,37 @@
+[package]
+name = "openkax"
+version = "0.1.0"
+edition = "2024"
+description = "Gateway local de IA: roteia classes kax/* para um pool de providers com scheduler de quota"
+license = "MIT"
+publish = false
+
+[dependencies]
+axum = "0.8.9"
+bytes = "1.12.1"
+dotenvy = "0.15.7"
+futures = "0.3.34"
+notify = "8.2.1"
+# TLS via rustls + ring (sem openssl, sem aws-lc-rs) — ver ADR 0002.
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "http2", "json", "stream"] }
+rmcp = { version = "3.8.0", features = ["server", "transport-io"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync"] }
+toml = "1.1.8"
+tracing = "0.1.44"
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter", "ansi"] }
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "net"] }
+wiremock = "0.6.5"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = "z"
+panic = "abort"
+strip = true

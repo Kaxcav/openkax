@@ -1,0 +1,103 @@
+# providers.toml — provider é dado, não código (PLANO_MESTRE §3.2).
+# Limites são voláteis (nov/2026): `openkax doctor` / `./doctor.sh` para conferir.
+# Chaves NUNCA aqui: só o nome da variável de ambiente em `auth.env`.
+
+[defaults]
+request_timeout_ms = 60000
+first_token_timeout_ms = 8000
+estimate_chars_per_token = 3.6     # recalibrado por provider via `usage`
+safety_factor = 1.0
+daily_reset_utc = "00:00"          # reset de RPD/TPD quando o provider não define `limits.reset_utc`
+
+[[provider]]
+id = "gemini"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+auth = { kind = "bearer", env = "GEMINI_API_KEY" }
+models = ["gemini-flash", "gemini-flash-lite"]
+limits = { rpm = 10, tpm = 250000, rpd = 250, max_ctx = 1000000 }
+quirks = { strip_params = ["logprobs", "frequency_penalty"], tool_choice = "auto_only" }
+cooldown = { on_429_s = 60, on_5xx_s = 20, on_timeout_s = 30, on_4xx_other_s = 600 }
+
+[[provider]]
+id = "groq"
+base_url = "https://api.groq.com/openai/v1"
+auth = { kind = "bearer", env = "GROQ_API_KEY" }
+models = ["qwen-coder", "llama-70b"]
+limits = { rpm = 30, tpm = 8000, rpd = 1000, tpd = 200000, max_ctx = 128000 }
+
+[[provider]]
+id = "mistral"
+base_url = "https://api.mistral.ai/v1"
+auth = { kind = "bearer", env = "MISTRAL_API_KEY" }
+models = ["codestral-latest", "mistral-medium-latest"]
+limits = { rpm = 2, tpm = 500000, tokens_per_month = 1000000000 }
+
+[[provider]]
+id = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+auth = { kind = "bearer", env = "OPENROUTER_API_KEY" }
+extra_headers = { "HTTP-Referer" = "http://localhost", "X-Title" = "OpenKax" }
+models = ["qwen/qwen3-coder:free", "deepseek/deepseek-chat:free"]
+limits = { rpm = 20, rpd = 1000 }
+
+[[provider]]
+id = "deepseek"
+base_url = "https://api.deepseek.com/v1"
+auth = { kind = "bearer", env = "DEEPSEEK_API_KEY" }
+models = ["deepseek-chat"]
+limits = { rpm = 60 }
+paid = true
+
+[[provider]]
+id = "anthropic"
+base_url = "https://api.anthropic.com"
+auth = { kind = "passthrough" }        # repassa Authorization/x-api-key do cliente
+native = "anthropic"
+
+# ---------------------------------------------------------------- classes (§1.1)
+
+[[class]]
+id = "kax/coder-fast"
+max_packet_tokens = 6000
+route = [
+  { provider = "groq", model = "qwen-coder" },
+  { provider = "gemini", model = "gemini-flash" },
+  { provider = "deepseek", model = "deepseek-chat" },
+]
+
+[[class]]
+id = "kax/coder-smart"
+max_packet_tokens = 60000
+# Haiku (pago) como último degrau entra na Fase 1, junto com o translator.
+route = [
+  { provider = "gemini", model = "gemini-flash" },
+  { provider = "mistral", model = "codestral-latest" },
+  { provider = "deepseek", model = "deepseek-chat" },
+  { provider = "openrouter", model = "qwen/qwen3-coder:free" },
+]
+
+[[class]]
+id = "kax/summarizer"
+max_packet_tokens = 200000
+route = [
+  { provider = "gemini", model = "gemini-flash-lite" },
+  { provider = "gemini", model = "gemini-flash" },
+  { provider = "openrouter", model = "deepseek/deepseek-chat:free" },
+]
+
+[[class]]
+id = "kax/reviewer"
+max_packet_tokens = 60000
+route = [
+  { provider = "mistral", model = "mistral-medium-latest" },
+  { provider = "gemini", model = "gemini-flash" },
+  { provider = "deepseek", model = "deepseek-chat" },
+]
+
+[[class]]
+id = "kax/cheap-long"
+max_packet_tokens = 500000
+route = [
+  { provider = "gemini", model = "gemini-flash" },
+  { provider = "mistral", model = "mistral-medium-latest" },
+]
