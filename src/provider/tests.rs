@@ -648,6 +648,21 @@ fn alnum9_rewrites_tool_call_ids_consistently() {
     }
 }
 
+/// Só exatamente 9 passa: alfanumérico mais longo ou mais curto também é recusado.
+#[test]
+fn alnum9_rewrites_alphanumeric_ids_of_other_lengths() {
+    for id in ["abcdefghij", "abcdefgh"] {
+        let got = upstream_messages(
+            r#"tool_call_id = "alnum9""#,
+            json!([{ "role": "tool", "tool_call_id": id, "content": "1" }]),
+        );
+        let new = got[0]["tool_call_id"].as_str().unwrap();
+        assert_ne!(new, id);
+        assert_eq!(new.len(), 9, "{new}");
+        assert!(new.chars().all(|c| c.is_ascii_alphanumeric()), "{new}");
+    }
+}
+
 /// Cada request é traduzida sozinha: o mesmo `id` tem de virar o mesmo valor sempre.
 /// O valor fixo protege sessões em andamento de uma troca de algoritmo.
 #[test]
@@ -698,6 +713,24 @@ fn message_quirks_tolerate_odd_shapes() {
         got[3]["content"][1],
         json!({ "type": "text", "text": "[image omitted: provider has no vision]" })
     );
+}
+
+/// Assinatura `null` é chamada sem assinatura. `extra_content` de forma estranha,
+/// vindo de `/v1/chat/completions`, não pode derrubar o processo (`panic = "abort"`).
+#[test]
+fn null_or_malformed_extra_content_gets_the_neutral_signature() {
+    let neutral = signature("skip_thought_signature_validator");
+    for extra in [
+        json!({ "google": { "thought_signature": null } }),
+        json!("x"),
+        json!({ "google": "x" }),
+    ] {
+        let got = upstream_messages(
+            "thought_signatures = true",
+            json!([{ "role": "assistant", "tool_calls": [call("c1", extra.clone())] }]),
+        );
+        assert_eq!(got[0]["tool_calls"][0]["extra_content"], neutral, "{extra}");
+    }
 }
 
 /// O default não altera nada que a Fase 0 já mandava.

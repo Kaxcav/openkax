@@ -24,4 +24,11 @@ Entradas mais recentes no fim. Formato e regras em `RUNBOOK.md`.
 - adiado, não descartado: acessor de `chars_per_token` por classe (F1-5), campo `status` no ledger (F1-6), registrados no `tasks.json`.
 - pendências para o Kaxcav, sem bloquear: degrau Haiku do `coder-smart` fica fora da F1 (ADR 0006). O default novo tira `extra_content` de quem não tem o quirk, o que muda a Fase 0 só para cliente que o mandava a provider não-Gemini. Rodada dupla real com Gemini e `$schema` nas tools só dá para conferir com provider real: vão para o roteiro da F1-8.
 
-## 2026-11-02 17:12 — F1-2 request — EM ANDAMENTO
+## 2026-11-02 17:12 — F1-2 request — FEITO (CI pendente)
+- entrou: `src/translate/anthropic/request.rs` (`to_openai_request`), `decode_tool_use_id`, quirks `strip_images`, `thought_signatures` e `tool_call_id` em `build_upstream_body`. `providers.toml`: `thought_signatures` no gemini e `alnum9` no mistral, sem mudar rota, limite ou modelo.
+- testes: 142 unitários + 32 de integração verdes, clippy e fmt limpos; 45 de aceite seguem `#[ignore]` (F1-3..F1-7). **CI do commit em andamento ao fechar a entrada; a próxima execução confere primeiro.**
+- revisão independente, corrigidos: assinatura contava na estimativa (cerca de 1150 tokens por passo com 4 KB, tamanho suposto), agora `extra_content` não conta; `assistant` seguidos separavam `tool_calls` dos resultados, agora fundem; `disable_parallel_tool_use` sumia com `tool_choice` descartado; `thought_signature: null` não recebia o valor neutro. Seis lacunas de teste achadas por mutação, fechadas.
+- teste do CONTRACT alterado: `tool_use_becomes_assistant_tool_calls` tinha dois `assistant` seguidos e esperava mantê-los separados, o que contradiz a regra do ADR 0006 de `tool` logo depois de `tool_calls`. Ganhou um `user` no meio; a fusão tem teste próprio.
+- só hipótese, sem provider real para provar, foi para o roteiro da F1-8: Codestral recusar `user` depois de `tool` (mais provável de aparecer, porque o Claude Code manda texto junto do resultado; o custo seria uma tentativa perdida antes do próximo degrau) e `assistant` no fim; Gemini recusar `parallel_tool_calls`. Nenhum provider tem `strip_images` ligado: quem não tem visão daria erro com imagem.
+- para a F1-4: tradução sem nenhuma mensagem além de `system` responde 400 local (nota no `tasks.json`).
+- descartado: mais de 4 `stop_sequences` em provider com limite. É raro, e cortar calado mudaria o comportamento pedido; o upstream responde o erro.

@@ -156,35 +156,48 @@ fn tool_result_text(
 }
 
 fn push_assistant(message: &Message, out: &mut Vec<ChatMessage>) {
-    let blocks = match &message.content {
-        MessageContent::Text(t) if t.is_empty() => return,
-        MessageContent::Text(t) => {
-            out.push(plain("assistant", openai::MessageContent::Text(t.clone())));
-            return;
+    let (text, calls) = match &message.content {
+        MessageContent::Text(t) => (join_texts(std::iter::once(t.as_str()), ""), Vec::new()),
+        MessageContent::Blocks(blocks) => {
+            let calls = blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolUse { id, name, input } => Some(tool_call(id, name, input)),
+                    _ => None,
+                })
+                .collect();
+            (join_texts(block_texts(blocks), "\n\n"), calls)
         }
-        MessageContent::Blocks(blocks) => blocks,
     };
-
-    let calls: Vec<Value> = blocks
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::ToolUse { id, name, input } => Some(tool_call(id, name, input)),
-            _ => None,
-        })
-        .collect();
-    let text = join_texts(block_texts(blocks), "\n\n");
     if text.is_none() && calls.is_empty() {
         return;
     }
 
-    let content = text.map_or(openai::MessageContent::Null, openai::MessageContent::Text);
-    let mut assistant = plain("assistant", content);
-    if !calls.is_empty() {
-        assistant
-            .extra
-            .insert("tool_calls".into(), Value::Array(calls));
+    // A Anthropic funde turnos seguidos do mesmo papel; no OpenAI, um `assistant`
+    // no meio separaria `tool_calls` dos seus resultados.
+    if out.last().is_none_or(|last| last.role != "assistant") {
+        out.push(plain("assistant", openai::MessageContent::Null));
     }
-    out.push(assistant);
+    let Some(assistant) = out.last_mut() else {
+        return;
+    };
+    if let Some(text) = text {
+        let joined = match assistant.content.take() {
+            Some(openai::MessageContent::Text(previous)) => format!("{previous}\n\n{text}"),
+            _ => text,
+        };
+        assistant.content = Some(openai::MessageContent::Text(joined));
+    }
+    if !calls.is_empty() {
+        match assistant.extra.get_mut("tool_calls") {
+            Some(Value::Array(previous)) => previous.extend(calls),
+            _ => {
+                assistant
+                    .extra
+                    .insert("tool_calls".into(), Value::Array(calls));
+            }
+        }
+    }
 }
 
 fn tool_call(id: &str, name: &str, input: &Value) -> Value {
@@ -232,26 +245,24 @@ fn insert_tool_choice(
         None => return,
         Some(ToolChoice::Auto {
             disable_parallel_tool_use,
-        }) => (json!("auto"), *disable_parallel_tool_use),
+        }) => (Some(json!("auto")), *disable_parallel_tool_use),
         Some(ToolChoice::Any {
             disable_parallel_tool_use,
-        }) => (json!("required"), *disable_parallel_tool_use),
-        Some(ToolChoice::None) => (json!("none"), false),
+        }) => (Some(json!("required")), *disable_parallel_tool_use),
+        Some(ToolChoice::None) => (Some(json!("none")), false),
         Some(ToolChoice::Tool {
             name,
             disable_parallel_tool_use,
         }) => {
             // Tool de servidor não vira function: forçá-la daria 400 no upstream.
-            if !tools.iter().any(|t| t["function"]["name"] == *name) {
-                return;
-            }
-            (
-                json!({ "type": "function", "function": { "name": name } }),
-                *disable_parallel_tool_use,
-            )
+            let usable = tools.iter().any(|t| t["function"]["name"] == *name);
+            let forced = json!({ "type": "function", "function": { "name": name } });
+            (usable.then_some(forced), *disable_parallel_tool_use)
         }
     };
-    extra.insert("tool_choice".into(), value);
+    if let Some(value) = value {
+        extra.insert("tool_choice".into(), value);
+    }
     if disable_parallel {
         extra.insert("parallel_tool_calls".into(), false.into());
     }

@@ -1562,13 +1562,29 @@ fn request_text(request: &ChatCompletionRequest) -> (usize, usize) {
             Some(MessageContent::Null) | None => {}
         }
         if let Some(tc) = m.extra.get("tool_calls") {
-            chars += json_len(tc);
+            chars += json_len(tc).saturating_sub(extra_content_len(tc));
         }
     }
     if let Some(tools) = request.extra.get("tools") {
         chars += json_len(tools);
     }
     (chars, request.messages.len())
+}
+
+/// Chars de `extra_content` no JSON de `tool_calls`. A assinatura de raciocínio
+/// (Gemini, ADR 0006) tem alguns KB por passo de tool e não é prompt: contá-la daria
+/// `PacketTooLarge` e reserva inflada numa sessão longa.
+fn extra_content_len(tool_calls: &serde_json::Value) -> usize {
+    const KEY_AND_SEPARATORS: usize = r#""extra_content":,"#.len();
+    tool_calls.as_array().map_or(0, |calls| {
+        calls
+            .iter()
+            .filter_map(|call| call.get("extra_content"))
+            .map(|extra| {
+                KEY_AND_SEPARATORS + serde_json::to_string(extra).map_or(0, |s| s.chars().count())
+            })
+            .sum()
+    })
 }
 
 fn tokens_from(chars: usize, messages: usize, chars_per_token: f64) -> u32 {

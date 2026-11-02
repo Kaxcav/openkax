@@ -166,7 +166,7 @@
       "id": "F1-2",
       "title": "Request Anthropic → OpenAI",
       "owner": "lead",
-      "status": "todo",
+      "status": "done",
       "depends": [
         "F1-1"
       ],
@@ -190,7 +190,8 @@
       "depends": [
         "F1-2",
         "F1-3"
-      ]
+      ],
+      "note": "Tradução que sobra sem nenhuma mensagem que não seja system (só `document`, por exemplo) responde 400 invalid_request_error local, sem gastar cota: to_openai_request não sinaliza erro (revisão da F1-2)."
     },
     {
       "id": "F1-5",
@@ -232,7 +233,7 @@
         "F1-6",
         "F1-7"
       ],
-      "note": "Roteiro manual inclui: rodada dupla real com Gemini (assinatura), $schema/additionalProperties nas tools do Claude Code, captura de request real para a fixture."
+      "note": "Roteiro manual inclui: rodada dupla real com Gemini (assinatura), $schema/additionalProperties nas tools do Claude Code, captura de request real para a fixture. Conferir também com provider real (hipóteses da revisão da F1-2): Codestral com `user` depois de `tool` e com `assistant` no fim (prefill); Gemini com parallel_tool_calls; quais providers precisam de strip_images (nenhum ligado ainda)."
     },
     {
       "id": "F2-1",

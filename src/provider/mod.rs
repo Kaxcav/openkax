@@ -794,7 +794,7 @@ fn ensure_thought_signature(call: &mut serde_json::Map<String, Value>) {
     if !google.is_object() {
         *google = serde_json::json!({});
     }
-    if google.get("thought_signature").is_none() {
+    if google.get("thought_signature").is_none_or(Value::is_null) {
         google["thought_signature"] = SKIP_THOUGHT_SIGNATURE.into();
     }
 }

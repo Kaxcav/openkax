@@ -333,6 +333,7 @@ fn tool_use_becomes_assistant_tool_calls() {
             { "type": "tool_use", "id": "t1", "name": "Read", "input": { "p": "a" } },
             { "type": "tool_use", "id": "t2", "name": "Ls", "input": {} },
         ]},
+        user("segue"),
         { "role": "assistant", "content": [
             { "type": "tool_use", "id": "t3", "name": "Ls", "input": {} },
         ]},
@@ -346,6 +347,7 @@ fn tool_use_becomes_assistant_tool_calls() {
                 "content": "vou ler",
                 "tool_calls": [call("t1", "Read", r#"{"p":"a"}"#), call("t2", "Ls", "{}")],
             },
+            user("segue"),
             { "role": "assistant", "content": null, "tool_calls": [call("t3", "Ls", "{}")] },
         ])
     );
@@ -448,13 +450,28 @@ fn tool_choice_table() {
 
 #[test]
 fn disable_parallel_tool_use_maps_to_parallel_tool_calls_false() {
-    let v = translate(json!({
-        "model": "kax/x", "max_tokens": 1, "messages": [user("oi")],
-        "tools": [{ "name": "Read", "input_schema": { "type": "object" } }],
-        "tool_choice": { "type": "auto", "disable_parallel_tool_use": true },
-    }));
-    assert_eq!(v["tool_choice"], "auto");
-    assert_eq!(v["parallel_tool_calls"], false);
+    for (choice, want) in [
+        (
+            json!({ "type": "auto", "disable_parallel_tool_use": true }),
+            json!("auto"),
+        ),
+        (
+            json!({ "type": "any", "disable_parallel_tool_use": true }),
+            json!("required"),
+        ),
+        (
+            json!({ "type": "tool", "name": "Read", "disable_parallel_tool_use": true }),
+            json!({ "type": "function", "function": { "name": "Read" } }),
+        ),
+    ] {
+        let v = translate(json!({
+            "model": "kax/x", "max_tokens": 1, "messages": [user("oi")],
+            "tools": [{ "name": "Read", "input_schema": { "type": "object" } }],
+            "tool_choice": choice,
+        }));
+        assert_eq!(v["tool_choice"], want, "{choice}");
+        assert_eq!(v["parallel_tool_calls"], false, "{choice}");
+    }
 }
 
 /// OpenAI recusa `tool_choice` sem `tools`; server tools sozinhas contam como sem tools.
@@ -656,7 +673,8 @@ fn tool_result_image_and_user_content_share_one_user_message() {
     );
 }
 
-/// `tool_choice` forçando uma tool que não virou function daria 400 no upstream.
+/// `tool_choice` forçando uma tool que não virou function daria 400 no upstream. O
+/// pedido de não paralelizar continua valendo para as tools que sobraram.
 #[test]
 fn tool_choice_naming_a_dropped_tool_is_omitted() {
     let v = translate(json!({
@@ -669,7 +687,84 @@ fn tool_choice_naming_a_dropped_tool_is_omitted() {
     }));
     assert_eq!(v["tools"].as_array().unwrap().len(), 1);
     assert!(v.get("tool_choice").is_none(), "{v}");
-    assert!(v.get("parallel_tool_calls").is_none(), "{v}");
+    assert_eq!(v["parallel_tool_calls"], false, "{v}");
+}
+
+/// O OpenAI exige `tool` logo depois de `tool_calls`; a Anthropic funde turnos
+/// seguidos do mesmo papel, então os dois assistants viram um só.
+#[test]
+fn consecutive_assistants_merge_before_the_tool_results() {
+    let call = |id: &str| json!({ "id": id, "type": "function", "function": { "name": "Ls", "arguments": "{}" } });
+    let tool = |id: &str| json!({ "role": "tool", "tool_call_id": id, "content": "r" });
+    let result = |id: &str| json!({ "type": "tool_result", "tool_use_id": id, "content": "r" });
+    let use_ = |id: &str| json!({ "type": "tool_use", "id": id, "name": "Ls", "input": {} });
+
+    let two_calls = with_messages(json!([
+        { "role": "assistant", "content": [{ "type": "text", "text": "um" }, use_("a")] },
+        { "role": "assistant", "content": [{ "type": "text", "text": "dois" }, use_("b")] },
+        { "role": "user", "content": [result("a"), result("b")] },
+    ]));
+    assert_eq!(
+        two_calls["messages"],
+        json!([
+            { "role": "assistant", "content": "um\n\ndois", "tool_calls": [call("a"), call("b")] },
+            tool("a"),
+            tool("b"),
+        ])
+    );
+
+    let text_after_call = with_messages(json!([
+        { "role": "assistant", "content": [use_("a")] },
+        { "role": "assistant", "content": "depois" },
+        { "role": "user", "content": [result("a")] },
+    ]));
+    assert_eq!(
+        text_after_call["messages"],
+        json!([
+            { "role": "assistant", "content": "depois", "tool_calls": [call("a")] },
+            tool("a"),
+        ])
+    );
+
+    let only_texts = with_messages(json!([
+        { "role": "assistant", "content": "a" },
+        { "role": "assistant", "content": [{ "type": "text", "text": "b" }] },
+    ]));
+    assert_eq!(
+        only_texts["messages"],
+        json!([{ "role": "assistant", "content": "a\n\nb" }])
+    );
+}
+
+/// Blocos de texto do mesmo assistant não se colam.
+#[test]
+fn assistant_text_blocks_join_with_a_blank_line() {
+    let v = with_messages(json!([{ "role": "assistant", "content": [
+        { "type": "text", "text": "a" },
+        { "type": "text", "text": "b" },
+    ]}]));
+    assert_eq!(v["messages"][0]["content"], "a\n\nb");
+}
+
+#[test]
+fn empty_text_is_not_a_part_next_to_an_image() {
+    let v = with_messages(json!([{ "role": "user", "content": [
+        { "type": "text", "text": "" },
+        { "type": "image", "source": { "type": "url", "url": "https://x/y.png" } },
+    ]}]));
+    assert_eq!(
+        v["messages"][0]["content"],
+        json!([{ "type": "image_url", "image_url": { "url": "https://x/y.png" } }])
+    );
+}
+
+#[test]
+fn tool_with_schema_but_no_name_is_dropped() {
+    let v = translate(json!({
+        "model": "kax/x", "max_tokens": 1, "messages": [user("oi")],
+        "tools": [{ "input_schema": { "type": "object" } }],
+    }));
+    assert!(v.get("tools").is_none(), "{v}");
 }
 
 #[test]
@@ -701,6 +796,30 @@ fn null_tool_input_becomes_empty_arguments() {
     assert_eq!(
         v["messages"][0]["tool_calls"][0]["function"]["arguments"],
         "{}"
+    );
+}
+
+/// ADR 0006: a assinatura não pesa na estimativa. O teste do scheduler cobre o
+/// `extra_content`; este cobre o caminho inteiro a partir do `tool_use.id`.
+#[test]
+fn signature_does_not_count_in_the_estimate() {
+    let conversation = |id: String| {
+        parse(json!({
+            "model": "kax/x", "max_tokens": 1,
+            "messages": [
+                { "role": "assistant", "content": [
+                    { "type": "tool_use", "id": id, "name": "Ls", "input": {} },
+                ]},
+                { "role": "user", "content": [
+                    { "type": "tool_result", "tool_use_id": id, "content": "r" },
+                ]},
+            ],
+        }))
+    };
+    let signed = format!("c1{TOOL_ID_SIGNATURE_SEP}{}", "53".repeat(4000));
+    assert_eq!(
+        estimate_tokens(&to_openai_request(&conversation(signed)), 4.0),
+        estimate_tokens(&to_openai_request(&conversation("c1".to_owned())), 4.0)
     );
 }
 
