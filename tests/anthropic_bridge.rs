@@ -241,7 +241,6 @@ fn tempdir(tag: &str) -> std::path::PathBuf {
 
 /// O corpo que chega ao upstream é a tradução, com o modelo do degrau.
 #[tokio::test]
-#[ignore = "F1-4"]
 async fn stream_translates_request_and_response() {
     let (groq, gemini) = mocks().await;
     upstream("k-groq", "qwen-coder")
@@ -261,6 +260,7 @@ async fn stream_translates_request_and_response() {
     let mut body = req_body("kax/coder-fast", true, "oi");
     body["system"] =
         json!([{ "type": "text", "text": "regras", "cache_control": { "type": "ephemeral" } }]);
+    let sent = body.clone();
     let r = messages(&gw, body).await;
 
     assert_eq!(r.status, 200, "{r:?}");
@@ -289,7 +289,12 @@ async fn stream_translates_request_and_response() {
         start["model"], "kax/coder-fast",
         "o modelo que o cliente pediu"
     );
-    assert!(start["usage"]["input_tokens"].as_u64().unwrap() > 0);
+    let parsed: MessagesRequest = serde_json::from_value(sent).unwrap();
+    assert_eq!(
+        start["usage"]["input_tokens"],
+        estimate_tokens(&to_openai_request(&parsed), 3.6),
+        "a mesma estimativa do count_tokens, sem safety_factor"
+    );
     assert_eq!(text_of(&ev), "olá");
     assert_eq!(ev[4].data["delta"]["stop_reason"], "end_turn");
 
@@ -297,7 +302,6 @@ async fn stream_translates_request_and_response() {
 }
 
 #[tokio::test]
-#[ignore = "F1-4"]
 async fn non_stream_returns_a_full_message_with_tool_use() {
     let (groq, gemini) = mocks().await;
     let body = [
@@ -344,7 +348,6 @@ async fn non_stream_returns_a_full_message_with_tool_use() {
 
 /// O evento sai quando o chunk chega, não no fim do upstream.
 #[tokio::test]
-#[ignore = "F1-4"]
 async fn stream_is_delivered_live() {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let first =
@@ -368,7 +371,6 @@ async fn stream_is_delivered_live() {
 /// Rodada completa com o Gemini: a assinatura volta sozinha, e o `id` que o
 /// upstream vê é o dele.
 #[tokio::test]
-#[ignore = "F1-4"]
 async fn thought_signature_survives_the_tool_round_trip() {
     let (groq, gemini) = mocks().await;
     let body = [
@@ -441,7 +443,6 @@ async fn thought_signature_survives_the_tool_round_trip() {
 
 /// Mesmos cenários do `tests/fallback.rs`, agora por `/v1/messages`.
 #[tokio::test]
-#[ignore = "F1-4"]
 async fn fallback_on_429_and_provider_stays_in_cooldown() {
     let (groq, gemini) = mocks().await;
     upstream("k-groq", "qwen-coder")
@@ -468,7 +469,6 @@ async fn fallback_on_429_and_provider_stays_in_cooldown() {
 }
 
 #[tokio::test]
-#[ignore = "F1-4"]
 async fn fallback_on_first_token_timeout() {
     let (groq, gemini) = mocks().await;
     upstream("k-groq", "qwen-coder")
@@ -499,7 +499,6 @@ async fn fallback_on_first_token_timeout() {
 
 /// Morte pós-1º-token: evento `error`, sem `message_stop` e sem fallback.
 #[tokio::test]
-#[ignore = "F1-4"]
 async fn post_first_token_failure_becomes_error_event() {
     let (groq, gemini) = mocks().await;
     let body = [
@@ -541,7 +540,6 @@ async fn post_first_token_failure_becomes_error_event() {
 
 /// Não-stream: a mesma morte é um erro HTTP completo.
 #[tokio::test]
-#[ignore = "F1-4"]
 async fn post_first_token_failure_non_stream_is_http_error() {
     let (groq, gemini) = mocks().await;
     let body = [
@@ -561,7 +559,6 @@ async fn post_first_token_failure_non_stream_is_http_error() {
 }
 
 #[tokio::test]
-#[ignore = "F1-4"]
 async fn insufficient_tpm_skips_provider_without_a_request() {
     let (groq, gemini) = mocks().await;
     upstream("k-groq", "qwen-coder")
@@ -587,7 +584,6 @@ async fn insufficient_tpm_skips_provider_without_a_request() {
 }
 
 #[tokio::test]
-#[ignore = "F1-4"]
 async fn all_exhausted_is_429_with_retry_after_in_anthropic_format() {
     let (groq, gemini) = mocks().await;
     upstream("k-groq", "qwen-coder")
@@ -614,7 +610,6 @@ async fn all_exhausted_is_429_with_retry_after_in_anthropic_format() {
 
 /// Pacote maior que `max_packet_tokens` da classe: 413 sem tocar upstream.
 #[tokio::test]
-#[ignore = "F1-4"]
 async fn too_large_is_413_in_anthropic_format() {
     let (groq, gemini) = mocks().await;
     let gw = gateway(&groq, &gemini).await;
@@ -627,7 +622,6 @@ async fn too_large_is_413_in_anthropic_format() {
 
 /// Sem chave nenhuma: nenhum provider disponível.
 #[tokio::test]
-#[ignore = "F1-4"]
 async fn no_provider_available_is_503_in_anthropic_format() {
     let (groq, gemini) = mocks().await;
     let gw = Gateway::spawn(&two_provider_config(&groq.uri(), &gemini.uri()), &[]).await;
@@ -640,7 +634,6 @@ async fn no_provider_available_is_503_in_anthropic_format() {
 /// Erro de culpa da request nos dois degraus volta com o status do upstream,
 /// no formato da Anthropic.
 #[tokio::test]
-#[ignore = "F1-4"]
 async fn upstream_request_fault_keeps_status_in_anthropic_format() {
     let (groq, gemini) = mocks().await;
     let fault = || {
@@ -670,7 +663,6 @@ async fn upstream_request_fault_keeps_status_in_anthropic_format() {
 }
 
 #[tokio::test]
-#[ignore = "F1-4"]
 async fn bad_requests_answer_in_anthropic_format() {
     let (groq, gemini) = mocks().await;
     let gw = gateway(&groq, &gemini).await;
@@ -708,7 +700,6 @@ async fn bad_requests_answer_in_anthropic_format() {
 
 /// Os headers `x-openkax-*` valem aqui também.
 #[tokio::test]
-#[ignore = "F1-4"]
 async fn openkax_headers_apply() {
     let (groq, gemini) = mocks().await;
     upstream("k-gemini", "gemini-flash")
@@ -734,7 +725,6 @@ async fn openkax_headers_apply() {
 }
 
 #[tokio::test]
-#[ignore = "F1-4"]
 async fn ledger_and_quota_are_coherent() {
     let (groq, gemini) = mocks().await;
     let dir = tempdir("ledger-kax");
@@ -760,6 +750,365 @@ async fn ledger_and_quota_are_coherent() {
     let text = lines[0].to_string();
     assert!(!text.contains("segredo"), "{text}");
     assert_eq!(gw.quota().await["served_by_tier"]["free"], 1);
+}
+
+/// Tradução que sobra sem nenhuma mensagem: 400 local, sem gastar cota.
+#[tokio::test]
+async fn nothing_to_send_is_400_without_touching_upstream() {
+    let (groq, gemini) = mocks().await;
+    let gw = gateway(&groq, &gemini).await;
+
+    let mut no_messages = req_body("kax/coder-fast", true, "oi");
+    no_messages["messages"] = json!([]);
+    let mut only_document = req_body("kax/coder-fast", true, "oi");
+    only_document["messages"] = json!([{ "role": "user", "content": [
+        { "type": "document", "source": { "type": "text", "media_type": "text/plain", "data": "x" } },
+    ] }]);
+    only_document["system"] = json!("regras");
+    let mut zero_tokens = req_body("kax/coder-fast", true, "oi");
+    zero_tokens["max_tokens"] = json!(0);
+
+    for body in [no_messages, only_document, zero_tokens] {
+        let r = messages(&gw, body.clone()).await;
+        r.assert_error(400, "invalid_request_error");
+    }
+    assert!(groq.received_requests().await.unwrap().is_empty());
+    assert_eq!(gw.quota().await["served_by_tier"]["free"], 0);
+}
+
+/// Índice repetido e raciocínio: o despacho normaliza antes de traduzir.
+#[tokio::test]
+async fn stream_goes_through_the_relay_normalization() {
+    let (groq, gemini) = mocks().await;
+    let body = [
+        chunk(json!({ "reasoning_content": "pensando" }), None),
+        chunk(json!({ "content": "vou" }), None),
+        chunk(
+            json!({ "tool_calls": [{ "index": 0, "id": "c1", "function": { "name": "Read", "arguments": "{\"a\":1}" } }] }),
+            None,
+        ),
+        chunk(
+            json!({ "tool_calls": [{ "index": 0, "id": "c2", "function": { "name": "Grep", "arguments": "{\"b\":2}" } }] }),
+            None,
+        ),
+        chunk(json!({}), Some("tool_calls")),
+        "data: [DONE]\n\n".to_owned(),
+    ]
+    .concat();
+    upstream("k-groq", "qwen-coder")
+        .respond_with(sse_raw(body))
+        .mount(&groq)
+        .await;
+    let gw = gateway(&groq, &gemini).await;
+
+    let r = messages(&gw, req_body("kax/coder-fast", true, "oi")).await;
+
+    assert_eq!(r.status, 200, "{r:?}");
+    assert!(!r.text.contains("pensando"), "{}", r.text);
+    let ev = r.events();
+    let starts: Vec<&Value> = ev
+        .iter()
+        .filter(|e| e.name == "content_block_start")
+        .map(|e| &e.data["content_block"])
+        .collect();
+    assert_eq!(starts[0]["type"], "text");
+    assert_eq!(starts[1]["id"], "c1");
+    assert_eq!(starts[2]["id"], "c2");
+    assert_eq!(starts.len(), 3);
+    let args: Vec<&str> = ev
+        .iter()
+        .filter_map(|e| e.data["delta"]["partial_json"].as_str())
+        .collect();
+    assert_eq!(args, ["{\"a\":1}", "{\"b\":2}"]);
+    let delta = ev.iter().find(|e| e.name == "message_delta").unwrap();
+    assert_eq!(delta.data["delta"]["stop_reason"], "tool_use");
+}
+
+/// `usage` do upstream corrige a estimativa e fecha a reserva.
+#[tokio::test]
+async fn upstream_usage_reaches_message_delta_and_ledger() {
+    let (groq, gemini) = mocks().await;
+    let dir = tempdir("ledger-usage");
+    let usage = json!({ "prompt_tokens": 77, "completion_tokens": 5, "total_tokens": 82 });
+    let body = [
+        chunk(json!({ "content": "olá" }), Some("stop")),
+        format!(
+            "data: {}\n\n",
+            json!({ "id": "c", "choices": [], "usage": usage })
+        ),
+        "data: [DONE]\n\n".to_owned(),
+    ]
+    .concat();
+    upstream("k-groq", "qwen-coder")
+        .respond_with(sse_raw(body))
+        .mount(&groq)
+        .await;
+    let gw = spawn_with_ledger(
+        &two_provider_config(&groq.uri(), &gemini.uri()),
+        SECRETS,
+        dir.clone(),
+    )
+    .await;
+
+    let r = messages(&gw, req_body("kax/coder-fast", true, "oi")).await;
+
+    let ev = r.events();
+    let delta = ev.iter().find(|e| e.name == "message_delta").unwrap();
+    assert_eq!(delta.data["usage"]["input_tokens"], 77);
+    assert_eq!(delta.data["usage"]["output_tokens"], 5);
+    assert!(!r.text.contains("\"choices\""), "{}", r.text);
+    let lines = ledger_lines(&dir, 1).await;
+    assert_eq!(lines[0]["in"], 77);
+    assert_eq!(lines[0]["out"], 5);
+}
+
+/// `finish_reason: "error"` é morte no meio: evento `error`, sem `message_stop`, e o
+/// ledger e o cooldown contam como tal.
+#[tokio::test]
+async fn finish_reason_error_is_a_mid_stream_failure() {
+    let (groq, gemini) = mocks().await;
+    let dir = tempdir("ledger-finish-error");
+    let body = [
+        chunk(json!({ "content": "parcial" }), None),
+        chunk(json!({}), Some("error")),
+        "data: [DONE]\n\n".to_owned(),
+    ]
+    .concat();
+    upstream("k-groq", "qwen-coder")
+        .respond_with(sse_raw(body))
+        .expect(1)
+        .mount(&groq)
+        .await;
+    upstream("k-gemini", "gemini-flash")
+        .respond_with(sse_ok("do próximo"))
+        .expect(1)
+        .mount(&gemini)
+        .await;
+    let gw = spawn_with_ledger(
+        &two_provider_config(&groq.uri(), &gemini.uri()),
+        SECRETS,
+        dir.clone(),
+    )
+    .await;
+
+    let r = messages(&gw, req_body("kax/coder-fast", true, "oi")).await;
+
+    let ev = r.events();
+    assert_eq!(ev.last().unwrap().name, "error", "{ev:?}");
+    assert!(!names(&ev).contains(&"message_stop"), "{ev:?}");
+    let lines = ledger_lines(&dir, 1).await;
+    assert_eq!(lines[0]["outcome"], "mid_stream_error");
+
+    // O degrau que falhou esfria: a próxima request vai ao seguinte.
+    let r = messages(&gw, req_body("kax/coder-fast", true, "oi")).await;
+    assert_eq!(r.provider.as_deref(), Some("gemini"), "{r:?}");
+    groq.verify().await;
+    gemini.verify().await;
+}
+
+#[tokio::test]
+async fn finish_reason_error_non_stream_is_http_error() {
+    let (groq, gemini) = mocks().await;
+    let body = [
+        chunk(json!({ "content": "parcial" }), None),
+        chunk(json!({}), Some("error")),
+        "data: [DONE]\n\n".to_owned(),
+    ]
+    .concat();
+    upstream("k-groq", "qwen-coder")
+        .respond_with(sse_raw(body))
+        .mount(&groq)
+        .await;
+    let gw = gateway(&groq, &gemini).await;
+
+    let r = messages(&gw, req_body("kax/coder-fast", false, "oi")).await;
+
+    r.assert_error(502, "api_error");
+}
+
+/// Sem nenhum token entregue, `finish_reason: "error"` é falha do degrau: cai no
+/// próximo, nos dois modos.
+#[tokio::test]
+async fn finish_reason_error_before_first_token_falls_back() {
+    for stream in [true, false] {
+        let (groq, gemini) = mocks().await;
+        let body = [
+            chunk(json!({ "role": "assistant" }), None),
+            chunk(json!({}), Some("error")),
+            "data: [DONE]\n\n".to_owned(),
+        ]
+        .concat();
+        upstream("k-groq", "qwen-coder")
+            .respond_with(sse_raw(body))
+            .expect(1)
+            .mount(&groq)
+            .await;
+        upstream("k-gemini", "gemini-flash")
+            .respond_with(sse_ok("do próximo"))
+            .expect(1)
+            .mount(&gemini)
+            .await;
+        let gw = gateway(&groq, &gemini).await;
+
+        let r = messages(&gw, req_body("kax/coder-fast", stream, "oi")).await;
+
+        assert_eq!(r.status, 200, "stream {stream}: {r:?}");
+        assert_eq!(r.provider.as_deref(), Some("gemini"), "stream {stream}");
+        assert!(!r.text.contains("\"error\""), "{}", r.text);
+        groq.verify().await;
+        gemini.verify().await;
+    }
+}
+
+/// Morte real no meio: ledger e cooldown contam, e a mensagem do upstream não
+/// chega ao cliente, nos dois modos.
+#[tokio::test]
+async fn mid_stream_death_is_recorded_and_does_not_leak_upstream_text() {
+    for stream in [true, false] {
+        let (groq, gemini) = mocks().await;
+        let dir = tempdir(if stream { "death-stream" } else { "death-full" });
+        let body = [
+            chunk(json!({ "content": "parcial" }), None),
+            "data: {\"error\":{\"message\":\"SEGREDO do upstream\"}}\n\n".to_owned(),
+        ]
+        .concat();
+        upstream("k-groq", "qwen-coder")
+            .respond_with(sse_raw(body))
+            .expect(1)
+            .mount(&groq)
+            .await;
+        let gw = spawn_with_ledger(
+            &two_provider_config(&groq.uri(), &gemini.uri()),
+            SECRETS,
+            dir.clone(),
+        )
+        .await;
+
+        let r = messages(&gw, req_body("kax/coder-fast", stream, "oi")).await;
+
+        assert!(!r.text.contains("SEGREDO"), "{}", r.text);
+        if stream {
+            assert_eq!(r.events().last().unwrap().name, "error");
+        } else {
+            r.assert_error(502, "api_error");
+        }
+        let lines = ledger_lines(&dir, 1).await;
+        assert_eq!(lines[0]["outcome"], "mid_stream_error", "stream {stream}");
+        let q = gw.quota().await;
+        assert_eq!(
+            q["providers"][0]["models"][0]["state"]["state"], "cooldown",
+            "stream {stream}: {q}"
+        );
+    }
+}
+
+/// Com pin não há fallback: o erro do degrau volta no formato da Anthropic.
+#[tokio::test]
+async fn pinned_failures_answer_in_anthropic_format() {
+    let (groq, gemini) = mocks().await;
+    upstream("k-groq", "qwen-coder")
+        .respond_with(rate_limited(30))
+        .mount(&groq)
+        .await;
+    upstream("k-gemini", "gemini-flash")
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&gemini)
+        .await;
+    let gw = gateway(&groq, &gemini).await;
+    let body = req_body("kax/coder-fast", true, "oi")
+        .to_string()
+        .into_bytes();
+
+    let r = post(
+        &gw,
+        "/v1/messages",
+        &[("x-openkax-pin", "groq/qwen-coder")],
+        body.clone(),
+    )
+    .await;
+    r.assert_error(429, "rate_limit_error");
+    assert_eq!(r.retry_after.as_deref(), Some("30"), "{r:?}");
+
+    let r = post(
+        &gw,
+        "/v1/messages",
+        &[("x-openkax-pin", "gemini/gemini-flash")],
+        body,
+    )
+    .await;
+    r.assert_error(502, "api_error");
+}
+
+/// Cliente que desiste no meio não vira erro do provider.
+#[tokio::test]
+async fn client_disconnect_is_recorded() {
+    let dir = tempdir("ledger-disconnect");
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let first =
+        "data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"primeiro\"}}]}\n\n";
+    let up = live_upstream(first, "data: [DONE]\n\n", "text/event-stream", rx).await;
+    let gw = spawn_with_ledger(
+        &two_provider_config(&up, "http://127.0.0.1:9"),
+        SECRETS,
+        dir.clone(),
+    )
+    .await;
+
+    let mut resp = gw
+        .http
+        .post(format!("{}/v1/messages", gw.base))
+        .body(req_body("kax/coder-fast", true, "oi").to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let _ = resp.chunk().await.unwrap();
+    drop(resp);
+
+    let lines = ledger_lines(&dir, 1).await;
+    assert_eq!(lines[0]["outcome"], "client_disconnected", "{lines:?}");
+    let q = gw.quota().await;
+    assert_ne!(
+        q["providers"][0]["models"][0]["state"]["state"], "cooldown",
+        "{q}"
+    );
+}
+
+/// Imagem em base64 passa fácil do limite padrão de 2 MiB do axum. O campo fora
+/// dos tipos pesa no corpo e não no prompt.
+#[tokio::test]
+async fn body_limit_is_not_the_axum_default() {
+    let (groq, gemini) = mocks().await;
+    upstream("k-groq", "qwen-coder")
+        .respond_with(sse_ok("ok"))
+        .expect(1)
+        .mount(&groq)
+        .await;
+    let gw = gateway(&groq, &gemini).await;
+    let mut body = req_body("kax/coder-fast", false, "oi");
+    body["metadata"] = json!({ "pad": "x".repeat(3 * 1024 * 1024) });
+
+    let r = messages(&gw, body).await;
+
+    assert_eq!(r.status, 200, "{r:?}");
+    groq.verify().await;
+}
+
+/// Acima do limite, o 413 já sai no formato da Anthropic.
+#[tokio::test]
+async fn body_over_the_limit_is_413_in_anthropic_format() {
+    let (groq, gemini) = mocks().await;
+    let gw = gateway(&groq, &gemini).await;
+
+    let r = post(
+        &gw,
+        "/v1/messages",
+        &[("content-type", "application/json")],
+        vec![b' '; openkax::server::MESSAGES_BODY_LIMIT + 1],
+    )
+    .await;
+
+    r.assert_error(413, "request_too_large");
 }
 
 // ------------------------------------------------------------ count_tokens (F1-5)

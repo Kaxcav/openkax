@@ -186,12 +186,12 @@
       "id": "F1-4",
       "title": "POST /v1/messages para kax/* e aliases, erros no formato Anthropic",
       "owner": "lead",
-      "status": "todo",
+      "status": "done",
       "depends": [
         "F1-2",
         "F1-3"
       ],
-      "note": "Tradução que sobra sem nenhuma mensagem que não seja system (só `document`, por exemplo) responde 400 invalid_request_error local, sem gastar cota: to_openai_request não sinaliza erro (revisão da F1-2)."
+      "note": "server/anthropic.rs + despacho único com Wire em server.rs. 183 unitários + 61 de integração; 13 de aceite seguem #[ignore] (F1-5..F1-7). CI: ver LOG. finish_reason:error antes do 1º token agora cai no próximo degrau também em /v1/chat/completions; pin com 429 traz Retry-After (ADR 0006, Despacho)."
     },
     {
       "id": "F1-5",
@@ -233,7 +233,7 @@
         "F1-6",
         "F1-7"
       ],
-      "note": "Roteiro manual inclui: rodada dupla real com Gemini (assinatura), $schema/additionalProperties nas tools do Claude Code, captura de request real para a fixture. Conferir também com provider real (hipóteses da revisão da F1-2): Codestral com `user` depois de `tool` e com `assistant` no fim (prefill); Gemini com parallel_tool_calls; quais providers precisam de strip_images (nenhum ligado ainda). Hipóteses da revisão da F1-3: Gemini com chamadas paralelas de id vazio (o ToolIndexer agora separa); arguments como objeto; id fora de ^[a-zA-Z0-9_-]+$ (ex.: functions.Read:0), que a Anthropic recusaria se a sessão migrar para claude-*."
+      "note": "Roteiro manual inclui: rodada dupla real com Gemini (assinatura), $schema/additionalProperties nas tools do Claude Code, captura de request real para a fixture. Conferir também com provider real (hipóteses da revisão da F1-2): Codestral com `user` depois de `tool` e com `assistant` no fim (prefill); Gemini com parallel_tool_calls; quais providers precisam de strip_images (nenhum ligado ainda). Hipóteses da revisão da F1-3: Gemini com chamadas paralelas de id vazio (o ToolIndexer agora separa); arguments como objeto; id fora de ^[a-zA-Z0-9_-]+$ (ex.: functions.Read:0), que a Anthropic recusaria se a sessão migrar para claude-*. Hipóteses da revisão da F1-4: auto-compact do Claude Code pode depender do texto 'prompt is too long' no erro (nosso 413 e o 400 do upstream não trazem esse texto); stream sem `ping` fica mudo durante raciocínio longo depois do 1º token, e cliente com watchdog de inatividade pode cortar."
     },
     {
       "id": "F2-1",

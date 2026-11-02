@@ -266,6 +266,12 @@ pub(crate) async fn await_first_token(
                 }
                 let first = is_first_token(&c);
                 let finished = has_finish(&c);
+                // Nada chegou ao cliente ainda: é falha do degrau, cabe fallback.
+                if !first && has_error_finish(&c) {
+                    return Err(UpstreamError::Protocol(
+                        "finish_reason: error antes do 1º token".into(),
+                    ));
+                }
                 prelude.push(c);
                 if first || finished {
                     return Ok((prelude, finished));
@@ -299,6 +305,12 @@ async fn read_capped(resp: reqwest::Response, cap: usize) -> String {
 
 fn has_finish(c: &ChatCompletionChunk) -> bool {
     c.choices.iter().any(|ch| ch.finish_reason.is_some())
+}
+
+fn has_error_finish(c: &ChatCompletionChunk) -> bool {
+    c.choices
+        .iter()
+        .any(|ch| ch.finish_reason.as_deref() == Some("error"))
 }
 
 enum Event {

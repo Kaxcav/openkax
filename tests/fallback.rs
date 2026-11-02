@@ -571,3 +571,65 @@ async fn pin_to_disabled_model_is_409() {
         "{v}"
     );
 }
+
+/// Nada entregue ao cliente: `finish_reason: "error"` é falha do degrau, e o
+/// cliente recebe a resposta do próximo.
+#[tokio::test]
+async fn finish_reason_error_before_first_token_falls_back() {
+    let (groq, gemini) = mocks().await;
+    let body = [
+        chunk(json!({ "role": "assistant" }), None),
+        chunk(json!({}), Some("error")),
+        "data: [DONE]\n\n".to_owned(),
+    ]
+    .concat();
+    upstream("k-groq", "qwen-coder")
+        .respond_with(sse_raw(body))
+        .expect(1)
+        .mount(&groq)
+        .await;
+    upstream("k-gemini", "gemini-flash")
+        .respond_with(sse_ok("do próximo"))
+        .expect(1)
+        .mount(&gemini)
+        .await;
+    let gw = Gateway::spawn(&two_provider_config(&groq.uri(), &gemini.uri()), SECRETS).await;
+
+    let r = gw
+        .http
+        .post(format!("{}/v1/chat/completions", gw.base))
+        .json(&json!({ "model": "kax/coder-fast", "stream": true, "messages": [{ "role": "user", "content": "oi" }] }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(r.headers()["x-openkax-provider"], "gemini");
+    let text = r.text().await.unwrap();
+    assert!(text.contains("do próximo"), "{text}");
+    assert!(!text.contains("\"error\""), "{text}");
+    groq.verify().await;
+    gemini.verify().await;
+}
+
+/// Com pin não há fallback, mas o prazo do upstream chega ao cliente.
+#[tokio::test]
+async fn pinned_429_keeps_retry_after() {
+    let (groq, gemini) = mocks().await;
+    upstream("k-groq", "qwen-coder")
+        .respond_with(rate_limited(30))
+        .mount(&groq)
+        .await;
+    let gw = Gateway::spawn(&two_provider_config(&groq.uri(), &gemini.uri()), SECRETS).await;
+
+    let r = gw
+        .http
+        .post(format!("{}/v1/chat/completions", gw.base))
+        .header("x-openkax-pin", "groq/qwen-coder")
+        .json(&json!({ "model": "kax/coder-fast", "stream": true, "messages": [{ "role": "user", "content": "oi" }] }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(r.status(), 429);
+    assert_eq!(r.headers()["retry-after"], "30");
+}

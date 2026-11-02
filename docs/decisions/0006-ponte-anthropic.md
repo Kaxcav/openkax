@@ -45,7 +45,16 @@ A [doc do Gemini](https://ai.google.dev/gemini-api/docs/generate-content/thought
 - A resposta não-stream é a dobra dos mesmos eventos (`collect_response`), então os dois modos não divergem. Argumentos de tool que não são objeto JSON (truncados, `null`, lista) viram `input: {}`, com o `stop_reason` contando o motivo. No stream, `null`, lista ou número nem saem como delta, e `arguments` que vem como objeto vira a string dele.
 
 ### Erros HTTP
-`{"type":"error","error":{"type","message"}}`: 400 `invalid_request_error`, 404 `not_found_error`, 413 `request_too_large`, 409 `invalid_request_error` (pin em modelo desabilitado), 429 `rate_limit_error` com `retry-after`, 502 `api_error`, 503 `overloaded_error`. Vale também para os erros de `x-openkax-*`.
+`{"type":"error","error":{"type","message"}}`: 400 `invalid_request_error`, 404 `not_found_error`, 413 `request_too_large`, 409 `invalid_request_error` (pin em modelo desabilitado), 429 `rate_limit_error` com `retry-after`, 502 `api_error`, 503 `overloaded_error`. Vale também para os erros de `x-openkax-*`. Erro de request do upstream mantém o status dele (422 vira `invalid_request_error`), com o `error.message` do corpo se ele tiver essa forma.
+- Recusados sem gastar cota, com 400: sem `max_tokens` ou com `max_tokens: 0`, e tradução que não deixa nenhuma mensagem além de `system` (`messages` vazio, só blocos `document`).
+- Corpo até 32 MiB em `/v1/messages`: o padrão do axum (2 MiB) recusaria imagem em base64. Acima disso, 413 neste mesmo formato.
+
+### Despacho (F1-4)
+`dispatch` é um só para `/v1/chat/completions` e `/v1/messages`. O ponto de troca é `Wire`, que decide a forma do erro e da resposta; o código da rota nova fica em `server/anthropic.rs`.
+- `message_start.usage.input_tokens` usa `estimate_tokens` com o `chars_per_token` do candidato que respondeu, sem `safety_factor`, a mesma conta do `count_tokens`.
+- `finish_reason: "error"` depois do 1º token é morte no meio: ledger `mid_stream_error` e cooldown de 5xx, porque o cliente recebeu um evento `error`. Em `/v1/chat/completions` esse chunk segue como está (`outcome: ok`, sem cooldown), como antes.
+- `finish_reason: "error"` antes do 1º token é falha do degrau e cai no próximo, nas duas rotas: nada chegou ao cliente. **Isso muda a Fase 0**, onde o chunk ia ao cliente sem fallback.
+- Com pin, 429 traz `Retry-After` se o upstream informou, também em `/v1/chat/completions`.
 
 ### Passthrough
 `claude-*` sem alias vai direto ao provider `native = "anthropic"`, em caminho próprio: sem scheduler, sem quota, sem cooldown (o limite é da conta do cliente). Só o campo `model` é lido; bytes de request e resposta seguem intactos, query string incluída (`?beta=true`), e todos os headers do cliente passam, exceto hop-by-hop. `count_tokens` de `claude-*` segue o mesmo caminho. Ledger só com metadados, com um campo opcional novo `status`; resposta não-2xx da Anthropic não fica registrada como `ok`.

@@ -6,6 +6,7 @@
 //!   erros antes disso caem no próximo candidato sem o cliente perceber.
 //! - Header `x-openkax-provider` identifica o provider que respondeu.
 //! - Morte pós-1º-token: chunk final com `finish_reason: "error"` + `data: [DONE]`.
+//! - `finish_reason: "error"` antes do 1º token conta como erro do candidato.
 //! - Nenhum candidato disponível: `429` com `Retry-After` (segundos, arredondado pra cima).
 //! - Erro de culpa da request (400/413/422): no máximo 1 candidato extra; dois
 //!   seguidos → status do upstream devolvido ao cliente (ADR 0003, A3).
@@ -20,6 +21,11 @@
 //! - `x-openkax-pin: provider/modelo` (depuração) fixa o candidato; continua
 //!   passando por reserva/ledger; modelo desabilitado → 409. Com pin, a resposta
 //!   traz os headers de limite do upstream como `x-openkax-upstream-<nome>`.
+//!
+//! `POST /v1/messages` usa o mesmo despacho; só a forma da resposta e do erro muda
+//! ([`Wire`], módulo [`anthropic`], ADR 0006).
+
+mod anthropic;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -29,7 +35,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -59,6 +65,9 @@ pub const EXCLUDE_FAMILY_HEADER: &str = "x-openkax-exclude-family";
 pub const MAX_TIER_HEADER: &str = "x-openkax-max-tier";
 /// Header de request (depuração): `provider/modelo` fixo.
 pub const PIN_HEADER: &str = "x-openkax-pin";
+/// Teto do corpo de `/v1/messages`. O padrão do axum (2 MiB) recusaria imagem em
+/// base64, que o Claude Code manda inline.
+pub const MESSAGES_BODY_LIMIT: usize = 32 * 1024 * 1024;
 
 /// Dependências externas do servidor; tudo injetável para teste.
 pub struct Deps {
@@ -309,6 +318,10 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/chat/completions", post(chat_completions))
+        .route(
+            "/v1/messages",
+            post(anthropic::messages).layer(DefaultBodyLimit::max(MESSAGES_BODY_LIMIT)),
+        )
         .route("/v1/models", get(models))
         .route("/quota", get(quota))
         .with_state(state)
@@ -361,6 +374,45 @@ async fn quota(State(app): State<AppState>) -> Response {
 fn error_response(status: StatusCode, kind: &str, message: &str) -> Response {
     let body = json!({ "error": { "message": message, "type": kind, "code": status.as_u16() } });
     (status, axum::Json(body)).into_response()
+}
+
+/// Protocolo de entrada: decide a forma da resposta e do erro. A política de
+/// fallback é uma só, em [`dispatch`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Wire {
+    OpenAi,
+    Anthropic,
+}
+
+impl Wire {
+    /// `kind` é o `type` do OpenAI; a Anthropic deriva o dela do status.
+    fn error(self, status: StatusCode, kind: &str, message: &str) -> Response {
+        match self {
+            Self::OpenAi => error_response(status, kind, message),
+            Self::Anthropic => anthropic::error_response(status, message),
+        }
+    }
+
+    /// Erro de request do upstream, com o status dele.
+    fn upstream_fault(self, status: StatusCode, message: &str) -> Response {
+        match self {
+            Self::OpenAi => upstream_fault_response(status, message),
+            Self::Anthropic => {
+                anthropic::error_response(status, &anthropic::upstream_message(message))
+            }
+        }
+    }
+
+    /// 429 de rate limit, com `Retry-After` se houver prazo.
+    fn rate_limited(self, wait: Option<Duration>, message: &str) -> Response {
+        let mut r = self.error(StatusCode::TOO_MANY_REQUESTS, "rate_limit_error", message);
+        if let Some(wait) = wait {
+            let secs = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
+            r.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from(secs.max(1)));
+        }
+        r
+    }
 }
 
 /// Campos comuns do registro de ledger de uma request.
@@ -439,7 +491,7 @@ async fn chat_completions(
             );
         }
     };
-    let mut meta = Meta {
+    let meta = Meta {
         route: req.model.clone(),
         est_in: 0,
         started,
@@ -455,14 +507,27 @@ async fn chat_completions(
             "esta rota aceita apenas classes kax/* (veja /v1/models)",
         );
     }
-    let pick = match choose(&st, &headers, &req) {
+    dispatch(&st, &headers, &req, Wire::OpenAi, meta).await
+}
+
+/// Roteia pelo scheduler com fallback pré-1º-token. `req` é sempre OpenAI, com a
+/// classe em `model`; `wire` diz em que forma o cliente recebe a resposta.
+async fn dispatch(
+    st: &View,
+    headers: &HeaderMap,
+    req: &ChatCompletionRequest,
+    wire: Wire,
+    mut meta: Meta,
+) -> Response {
+    let started = meta.started;
+    let pick = match choose(st, headers, req, wire) {
         Ok(p) => p,
         Err(resp) => {
-            meta.record(&st, None, None, None, Outcome::Rejected);
+            meta.record(st, None, None, None, Outcome::Rejected);
             return resp;
         }
     };
-    meta.pinned = header_str(&headers, PIN_HEADER).is_some();
+    meta.pinned = header_str(headers, PIN_HEADER).is_some();
     meta.est_in = pick.candidates.first().map_or(0, |c| c.est_tokens);
 
     let mut waits: Vec<Duration> = pick.retry_after().into_iter().collect();
@@ -496,7 +561,7 @@ async fn chat_completions(
                 st.api_key(cand.provider_idx),
                 &cand.upstream_model,
                 cand.max_tokens_override,
-                &req,
+                req,
                 first_token_timeout,
                 first_token_timeout_reasoning,
             )
@@ -511,10 +576,18 @@ async fn chat_completions(
             Ok(stream) => {
                 res.first_token();
                 let ttft = started.elapsed();
-                let mut resp = if req.is_stream() {
-                    stream_response(st.clone(), meta, cand.clone(), res, stream, ttft, &req)
-                } else {
-                    aggregate_response(&st, meta, cand, res, stream, ttft).await
+                let mut resp = match (wire, req.is_stream()) {
+                    (Wire::OpenAi, true) => {
+                        stream_response(st.clone(), meta, cand.clone(), res, stream, ttft, req)
+                    }
+                    (Wire::OpenAi, false) => {
+                        aggregate_response(st, meta, cand, res, stream, ttft).await
+                    }
+                    (Wire::Anthropic, is_stream) => {
+                        let relay =
+                            new_relay(st.clone(), meta, cand.clone(), res, stream, ttft, false);
+                        anthropic::respond(relay, req, is_stream).await
+                    }
                 };
                 add_upstream_headers(&mut resp, &debug_headers);
                 return resp;
@@ -527,18 +600,16 @@ async fn chat_completions(
                 };
                 res.fail(&e);
                 meta.fallbacks += 1;
-                meta.record(&st, Some(cand), None, None, outcome);
+                meta.record(st, Some(cand), None, None, outcome);
                 let mut resp = match &e {
-                    UpstreamError::RequestFault { status, message } => upstream_fault_response(
+                    UpstreamError::RequestFault { status, message } => wire.upstream_fault(
                         StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_REQUEST),
                         message,
                     ),
-                    UpstreamError::RateLimited { .. } => error_response(
-                        StatusCode::TOO_MANY_REQUESTS,
-                        "rate_limit_error",
-                        &e.to_string(),
-                    ),
-                    _ => error_response(StatusCode::BAD_GATEWAY, "upstream_error", &e.to_string()),
+                    UpstreamError::RateLimited { retry_after, .. } => {
+                        wire.rate_limited(*retry_after, &e.to_string())
+                    }
+                    _ => wire.error(StatusCode::BAD_GATEWAY, "upstream_error", &e.to_string()),
                 };
                 add_upstream_headers(&mut resp, &debug_headers);
                 return resp;
@@ -566,30 +637,25 @@ async fn chat_completions(
     }
 
     if last_was_fault && let Some((status, message)) = fault {
-        meta.record(&st, None, None, None, Outcome::RequestFault);
+        meta.record(st, None, None, None, Outcome::RequestFault);
         let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST);
-        return upstream_fault_response(status, &message);
+        return wire.upstream_fault(status, &message);
     }
-    meta.record(&st, None, None, None, Outcome::Exhausted);
+    meta.record(st, None, None, None, Outcome::Exhausted);
     if let Some(wait) = waits.into_iter().filter(|d| !d.is_zero()).min() {
-        let secs = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
-        let mut r = error_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            "rate_limit_error",
+        return wire.rate_limited(
+            Some(wait),
             "todos os providers da classe estão sem saldo ou em cooldown",
         );
-        r.headers_mut()
-            .insert(header::RETRY_AFTER, HeaderValue::from(secs.max(1)));
-        return r;
     }
     if pick.all_never_fit() {
-        return error_response(
+        return wire.error(
             StatusCode::PAYLOAD_TOO_LARGE,
             "invalid_request_error",
             "a request não cabe em nenhum provider da classe (max_ctx/TPM)",
         );
     }
-    error_response(
+    wire.error(
         StatusCode::SERVICE_UNAVAILABLE,
         "service_unavailable",
         "nenhum provider disponível para a classe",
@@ -598,17 +664,22 @@ async fn chat_completions(
 
 /// Escolhe os candidatos: pin (depuração) ou rota da classe com filtros.
 #[allow(clippy::result_large_err)]
-fn choose(st: &View, headers: &HeaderMap, req: &ChatCompletionRequest) -> Result<Pick, Response> {
+fn choose(
+    st: &View,
+    headers: &HeaderMap,
+    req: &ChatCompletionRequest,
+    wire: Wire,
+) -> Result<Pick, Response> {
     let pick_err = |e: PickError| {
         let status = match e {
             PickError::UnknownClass(_) => StatusCode::NOT_FOUND,
             PickError::PacketTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
         };
-        error_response(status, "invalid_request_error", &e.to_string())
+        wire.error(status, "invalid_request_error", &e.to_string())
     };
     if let Some(pin) = header_str(headers, PIN_HEADER) {
         let Some((provider, model)) = pin.split_once('/') else {
-            return Err(error_response(
+            return Err(wire.error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
                 "x-openkax-pin deve ser provider/modelo",
@@ -619,7 +690,7 @@ fn choose(st: &View, headers: &HeaderMap, req: &ChatCompletionRequest) -> Result
             .pick_pinned(&req.model, provider, model, req)
             .map_err(|e| match e {
                 PinError::Pick(e) => pick_err(e),
-                PinError::UnknownTarget => error_response(
+                PinError::UnknownTarget => wire.error(
                     StatusCode::NOT_FOUND,
                     "model_not_found",
                     &format!("pin {pin:?}: provider/modelo inexistente"),
@@ -629,7 +700,7 @@ fn choose(st: &View, headers: &HeaderMap, req: &ChatCompletionRequest) -> Result
                         .ok()
                         .and_then(|v| v.as_str().map(str::to_owned))
                         .unwrap_or_default();
-                    error_response(
+                    wire.error(
                         StatusCode::CONFLICT,
                         "model_disabled",
                         &format!("pin {pin:?}: modelo desabilitado ({reason})"),
@@ -642,7 +713,7 @@ fn choose(st: &View, headers: &HeaderMap, req: &ChatCompletionRequest) -> Result
         Some(v) => match serde_json::from_value::<Tier>(Value::String(v.to_ascii_lowercase())) {
             Ok(t) => Some(t),
             Err(_) => {
-                return Err(error_response(
+                return Err(wire.error(
                     StatusCode::BAD_REQUEST,
                     "invalid_request_error",
                     "x-openkax-max-tier deve ser free, credit ou paid",
@@ -692,6 +763,10 @@ fn sse_bytes(chunk: &ChatCompletionChunk) -> Bytes {
 }
 
 const DONE: &str = "data: [DONE]\n\n";
+
+/// O provider morreu depois do 1º token. O detalhe fica no log: pode trazer trecho
+/// do corpo do upstream.
+const INTERRUPTED: &str = "o provider interrompeu a resposta no meio; reenvie a request";
 
 fn output_chars(chunk: &ChatCompletionChunk) -> usize {
     chunk
@@ -859,7 +934,7 @@ impl Relay {
         );
     }
 
-    fn finish_err(&mut self, e: &UpstreamError) -> Bytes {
+    fn finish_err(&mut self, e: &UpstreamError) {
         self.finished = true;
         tracing::warn!(provider = %self.cand.provider_id, model = %self.cand.model_id, error = %e, "stream interrompido após o 1º token");
         if let Some(r) = self.res.take() {
@@ -872,6 +947,10 @@ impl Relay {
             Some(self.ttft),
             Outcome::MidStreamError,
         );
+    }
+
+    /// O que o cliente OpenAI recebe depois de uma morte no meio.
+    fn error_tail(&self) -> Bytes {
         let (id, created, model) = self.last.clone();
         let chunk = ChatCompletionChunk {
             id,
@@ -894,32 +973,42 @@ impl Relay {
         Bytes::from(out)
     }
 
-    async fn next_bytes(&mut self) -> Option<Bytes> {
+    /// Próximo chunk para o cliente, já normalizado. `Ok(None)`: o upstream acabou.
+    /// Quem chama fecha com [`finish_ok`](Self::finish_ok) ou
+    /// [`finish_err`](Self::finish_err).
+    async fn next_chunk(&mut self) -> Result<Option<ChatCompletionChunk>, UpstreamError> {
         loop {
-            if self.finished {
-                return None;
+            let mut chunk = match self.prelude.pop_front() {
+                Some(c) => c,
+                None => match self.rest.next().await {
+                    Some(Ok(c)) => c,
+                    Some(Err(e)) => return Err(e),
+                    None => return Ok(None),
+                },
+            };
+            if self.observe(&mut chunk) {
+                return Ok(Some(chunk));
             }
-            if let Some(mut c) = self.prelude.pop_front() {
-                if self.observe(&mut c) {
-                    return Some(sse_bytes(&c));
-                }
-                continue;
+        }
+    }
+
+    async fn next_bytes(&mut self) -> Option<Bytes> {
+        if self.finished {
+            return None;
+        }
+        match self.next_chunk().await {
+            Ok(Some(c)) => Some(sse_bytes(&c)),
+            Ok(None) => {
+                self.finish_ok();
+                let mut out = self
+                    .usage_chunk()
+                    .map_or_else(Vec::new, |c| sse_bytes(&c).to_vec());
+                out.extend_from_slice(DONE.as_bytes());
+                Some(Bytes::from(out))
             }
-            match self.rest.next().await {
-                Some(Ok(mut c)) => {
-                    if self.observe(&mut c) {
-                        return Some(sse_bytes(&c));
-                    }
-                }
-                None => {
-                    self.finish_ok();
-                    let mut out = self
-                        .usage_chunk()
-                        .map_or_else(Vec::new, |c| sse_bytes(&c).to_vec());
-                    out.extend_from_slice(DONE.as_bytes());
-                    return Some(Bytes::from(out));
-                }
-                Some(Err(e)) => return Some(self.finish_err(&e)),
+            Err(e) => {
+                self.finish_err(&e);
+                Some(self.error_tail())
             }
         }
     }
@@ -987,7 +1076,11 @@ fn stream_response(
             .await
             .map(|b| (Ok::<_, std::convert::Infallible>(b), r))
     });
-    let mut resp = Response::new(Body::from_stream(body));
+    sse_response(Body::from_stream(body), provider)
+}
+
+fn sse_response(body: Body, provider: Option<HeaderValue>) -> Response {
+    let mut resp = Response::new(body);
     let h = resp.headers_mut();
     h.insert(
         header::CONTENT_TYPE,
@@ -1015,27 +1108,15 @@ async fn aggregate_response(
     let mut finish_reason: Option<String> = None;
     let mut chunks = Vec::new();
     loop {
-        if let Some(mut c) = relay.prelude.pop_front() {
-            relay.observe(&mut c);
-            chunks.push(c);
-            continue;
-        }
-        match relay.rest.next().await {
-            Some(Ok(mut c)) => {
-                relay.observe(&mut c);
-                chunks.push(c);
-            }
-            None => {
+        match relay.next_chunk().await {
+            Ok(Some(c)) => chunks.push(c),
+            Ok(None) => {
                 relay.finish_ok();
                 break;
             }
-            Some(Err(e)) => {
+            Err(e) => {
                 relay.finish_err(&e);
-                return error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "upstream_error",
-                    "o provider interrompeu a resposta no meio; reenvie a request",
-                );
+                return error_response(StatusCode::BAD_GATEWAY, "upstream_error", INTERRUPTED);
             }
         }
     }
