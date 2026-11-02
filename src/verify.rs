@@ -214,6 +214,10 @@ pub enum RunError {
     ApplyRejected { log: String },
     #[error("expect inválido {0:?}: use \"exit <N>\"")]
     BadExpect(String),
+    #[error("alteração fora do escopo: {0}")]
+    OutOfScope(String),
+    #[error("git {args}: {stderr}")]
+    Git { args: String, stderr: String },
     #[error("erro de E/S: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -326,6 +330,63 @@ pub fn apply_diff(worktree: &Path, diff: &str, max_log_bytes: usize) -> Result<(
     all.extend_from_slice(&out.stderr);
     let (log, _) = truncate_tail(&all, max_log_bytes);
     Err(RunError::ApplyRejected { log })
+}
+
+/// Modos aceitos no índice depois do apply: arquivo comum ou deleção.
+const STAGED_MODES: [&str; 3] = ["100644", "100755", "000000"];
+
+/// Guarda pós-apply (C2): o que o git de fato pôs no índice, comparado com o
+/// commit `base` via `git diff --cached --no-renames --raw -z`. Todo path tem
+/// de estar em `allowed` e todo modo novo tem de ser 100644, 100755 ou 000000
+/// (deleção). Não depende do parser: vale mesmo que ele deixe algo passar.
+pub fn check_staged(worktree: &Path, base: &str, allowed: &[String]) -> Result<(), RunError> {
+    ensure_worktree(worktree)?;
+    let args = [
+        "diff",
+        "--cached",
+        "--no-renames",
+        "--raw",
+        "-z",
+        base,
+        "--",
+    ];
+    let out = clean_env(&mut Command::new("git"), &[])
+        .args(args)
+        .current_dir(worktree)
+        .stdin(Stdio::null())
+        .output()?;
+    if !out.status.success() {
+        return Err(RunError::Git {
+            args: args.join(" "),
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+        });
+    }
+    // Cada entrada: `:<modo antigo> <modo novo> <hash> <hash> <status>\0<path>\0`.
+    let mut fields = out.stdout.split(|&b| b == 0).filter(|f| !f.is_empty());
+    while let Some(meta) = fields.next() {
+        let meta = String::from_utf8_lossy(meta);
+        let path = fields
+            .next()
+            .map(|p| String::from_utf8_lossy(p).into_owned())
+            .ok_or_else(|| RunError::OutOfScope(format!("saída inesperada do git: {meta}")))?;
+        let parts: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
+        let (new_mode, status) = (
+            parts.get(1).copied().unwrap_or(""),
+            parts.get(4).copied().unwrap_or(""),
+        );
+        if status.starts_with(['R', 'C']) {
+            return Err(RunError::OutOfScope(format!("{path}: rename/copy")));
+        }
+        if !allowed.contains(&path) {
+            return Err(RunError::OutOfScope(format!("{path}: fora da lista write")));
+        }
+        if !STAGED_MODES.contains(&new_mode) {
+            return Err(RunError::OutOfScope(format!(
+                "{path}: modo {new_mode} não permitido (só 100644, 100755 ou deleção)"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Executa os comandos em ordem no worktree; para no primeiro que falhar.
@@ -724,6 +785,74 @@ mod runner_tests {
         };
         let com = run_verify(d.path(), &cmd, "exit 0", &opts).unwrap();
         assert!(com.outcomes[0].log.contains("ok-456"), "{com:?}");
+    }
+
+    /// Repo com `src/a.rs` e `src/keep.rs`; a lista `write` é `src/a.rs` + `src/new.rs`.
+    fn src_repo() -> (TempDir, String, Vec<String>) {
+        let d = repo();
+        let p = d.path();
+        std::fs::create_dir_all(p.join("src")).unwrap();
+        std::fs::write(p.join("src/a.rs"), "a\n").unwrap();
+        std::fs::write(p.join("src/keep.rs"), "keep\n").unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "src"]);
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(p)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        let base = String::from_utf8(out.stdout).unwrap().trim().to_owned();
+        (d, base, vec!["src/a.rs".into(), "src/new.rs".into()])
+    }
+
+    const HUNK_A: &str =
+        "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-a\n+b\n";
+    const NEW_FILE: &str = "diff --git a/src/new.rs b/src/new.rs\nnew file mode 100644\n--- /dev/null\n+++ b/src/new.rs\n@@ -0,0 +1 @@\n+fn n() {}\n";
+
+    /// Aplica com o git direto (sem o parser) e exige que a guarda recuse.
+    fn guard_refuses(diff: &str, needle: &str) {
+        let (d, base, allowed) = src_repo();
+        apply_diff(d.path(), diff, 4096).expect("o git apply aceita este diff");
+        match check_staged(d.path(), &base, &allowed) {
+            Err(RunError::OutOfScope(why)) => assert!(why.contains(needle), "{why}"),
+            other => panic!("esperava OutOfScope com {needle:?}, veio {other:?}"),
+        }
+    }
+
+    /// C2 (a): hunk legítimo + bloco que renomeia arquivo fora da lista.
+    #[test]
+    fn guard_refuses_rename() {
+        let diff = format!(
+            "{HUNK_A}diff --git a/src/a.rs b/src/a.rs\nrename from src/keep.rs\nrename to src/evil.rs\n"
+        );
+        guard_refuses(&diff, "src/evil.rs");
+    }
+
+    /// C2 (b): copy para fora da lista antes de um arquivo novo legítimo.
+    #[test]
+    fn guard_refuses_copy() {
+        let diff = format!(
+            "diff --git a/src/new.rs b/src/new.rs\nsimilarity index 100%\ncopy from src/keep.rs\ncopy to src/evil2.rs\n{NEW_FILE}"
+        );
+        guard_refuses(&diff, "src/evil2.rs");
+    }
+
+    /// C2 (c): arquivo novo em path permitido, mas como symlink.
+    #[test]
+    fn guard_refuses_symlink() {
+        let diff = "diff --git a/src/new.rs b/src/new.rs\nnew file mode 120000\n--- /dev/null\n+++ b/src/new.rs\n@@ -0,0 +1 @@\n+../../../../../etc/passwd\n\\ No newline at end of file\n";
+        guard_refuses(diff, "120000");
+    }
+
+    #[test]
+    fn guard_accepts_edit_new_file_and_delete() {
+        let (d, base, allowed) = src_repo();
+        apply_diff(d.path(), &format!("{HUNK_A}{NEW_FILE}"), 4096).unwrap();
+        check_staged(d.path(), &base, &allowed).unwrap();
+        let del = "diff --git a/src/a.rs b/src/a.rs\ndeleted file mode 100644\n--- a/src/a.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-b\n";
+        apply_diff(d.path(), del, 4096).unwrap();
+        check_staged(d.path(), &base, &allowed).unwrap();
     }
 
     #[test]

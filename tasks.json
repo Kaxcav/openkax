@@ -216,6 +216,13 @@
       "owner": "lead",
       "status": "review",
       "note": "verify::clean_env: env_clear + allowlist fixa (PATH, HOME, USERPROFILE, CARGO_HOME, RUSTUP_*, TEMP/TMP/TMPDIR, SystemRoot/SystemDrive/windir/ComSpec/PATHEXT, LANG/LC_ALL, APPDATA/LOCALAPPDATA/PROGRAMDATA, NUMBER_OF_PROCESSORS, PROCESSOR_ARCHITECTURE, RUST_BACKTRACE, GIT_EXEC_PATH) nos comandos de verify, no git apply e no git() do worktree.rs (hooks/config do worktree passam por código do operário). env_passthrough opcional no .kax/verify.toml: recusa *_KEY/*_TOKEN/*_SECRET e auth.env/${VAR} do providers.toml (erro de config → needs_lead). 5 testes novos (OPENKAX_FAKE_API_KEY=vazou-123 não aparece no log; controle com passthrough; PATH/git --version; validação). 137 unitários + demais suítes verdes. cargo build com link MSVC conferido no Windows só com a allowlist. Não fecha leitura do .env em disco: ver ADR 0007, Modelo de ameaça"
+    },
+    {
+      "id": "F2-9",
+      "title": "Revisão PR #3, C2 (alto): diff do operário não renomeia, copia nem cria symlink fora da lista write",
+      "owner": "lead",
+      "status": "review",
+      "note": "Duas camadas. (1) parse_diff vira máquina de estados com a gramática do git apply: entre diff --git e ---/@@ só index (modo opcional 100644/100755), new/deleted file mode 100644/100755; rename/copy/similarity/old mode/new mode/120000/160000/binário → out_of_scope; diff --git exige a/<p> b/<p> iguais; ---/+++ exigem prefixo a/ ou b/ (o -p1 cortaria o 1º diretório) e o mesmo path; hunks contados pelo @@, linhas ---/+++ dentro de hunk são conteúdo (fim do falso positivo). (2) verify::check_staged: git diff --cached --no-renames --raw -z contra o commit base, todo path na lista write e modo 100644/100755/000000; roda depois do apply/write e de novo antes do commit (pega o que o verify criou ou commitou), fora do escopo → reset + retry (pós-verify → needs_lead). FullFile: write_files recusa path ou pai symlink (falha de escrita vira Stop). Testes: ataques (a)/(b)/(c) da revisão no parser e no git apply real + guarda; modo via index; prefixo/path inconsistente; hunk com '--- '; junction no Windows (symlink só cfg(unix)); verify que cria arquivo fora da lista não vira commit (integração). 148 unitários + 41 integração verdes"
     }
   ]
 }
