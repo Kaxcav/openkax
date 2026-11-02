@@ -210,28 +210,34 @@ pub(super) async fn count_tokens(
         .config()
         .resolve_alias(&model_only.model)
         .unwrap_or(&model_only.model);
-    if !class.starts_with("kax/") {
-        return passthrough(app, uri, headers, body, &model_only.model).await;
-    }
-    let req: MessagesRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(e) => {
-            return error_response(StatusCode::BAD_REQUEST, &format!("corpo inválido: {e}"));
-        }
-    };
-    let Some(cpt) = st.scheduler().class_chars_per_token(class) else {
-        return error_response(
+    if class.starts_with("kax/") {
+        let req: MessagesRequest = match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                return error_response(StatusCode::BAD_REQUEST, &format!("corpo inválido: {e}"));
+            }
+        };
+        let Some(cpt) = st.scheduler().class_chars_per_token(class) else {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                &format!("classe desconhecida: {}", class),
+            );
+        };
+        let translated = to_openai_request(&req);
+        let count = estimate_tokens(&translated, cpt);
+        (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "input_tokens": count })),
+        )
+            .into_response()
+    } else if class.starts_with("claude-") {
+        passthrough(app, uri, headers, body, &model_only.model).await
+    } else {
+        error_response(
             StatusCode::NOT_FOUND,
-            &format!("classe desconhecida: {}", class),
-        );
-    };
-    let translated = to_openai_request(&req);
-    let count = estimate_tokens(&translated, cpt);
-    (
-        StatusCode::OK,
-        axum::Json(serde_json::json!({ "input_tokens": count })),
-    )
-        .into_response()
+            "esta rota aceita apenas classes kax/* e modelos claude-*",
+        )
+    }
 }
 
 pub(super) async fn messages(
@@ -255,31 +261,45 @@ pub(super) async fn messages(
         .config()
         .resolve_alias(&model_only.model)
         .unwrap_or(&model_only.model);
-    if !class.starts_with("kax/") {
-        return passthrough(app, uri, headers, body, &model_only.model).await;
-    }
-    let st = app.view();
-    let started = Instant::now();
-    let req: MessagesRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
-        Err(e) => {
-            return error_response(StatusCode::BAD_REQUEST, &format!("corpo inválido: {e}"));
+    if class.starts_with("kax/") {
+        let started = Instant::now();
+        let req: MessagesRequest = match serde_json::from_slice(&body) {
+            Ok(r) => r,
+            Err(e) => {
+                return error_response(StatusCode::BAD_REQUEST, &format!("corpo inválido: {e}"));
+            }
+        };
+        let meta = Meta {
+            route: req.model.clone(),
+            est_in: 0,
+            started,
+            fallbacks: 0,
+            pinned: false,
+            reasoning: false,
+        };
+        let translated = to_openai_request(&req);
+        if let Some(problem) = invalid(&req, &translated) {
+            meta.record(&st, None, None, None, Outcome::Rejected);
+            return error_response(StatusCode::BAD_REQUEST, problem);
         }
-    };
-    let meta = Meta {
-        route: req.model.clone(),
-        est_in: 0,
-        started,
-        fallbacks: 0,
-        pinned: false,
-        reasoning: false,
-    };
-    let translated = to_openai_request(&req);
-    if let Some(problem) = invalid(&req, &translated) {
+        dispatch(&st, &headers, &translated, Wire::Anthropic, meta).await
+    } else if class.starts_with("claude-") {
+        passthrough(app, uri, headers, body, &model_only.model).await
+    } else {
+        let meta = Meta {
+            route: model_only.model.clone(),
+            est_in: 0,
+            started: Instant::now(),
+            fallbacks: 0,
+            pinned: false,
+            reasoning: false,
+        };
         meta.record(&st, None, None, None, Outcome::Rejected);
-        return error_response(StatusCode::BAD_REQUEST, problem);
+        error_response(
+            StatusCode::NOT_FOUND,
+            "esta rota aceita apenas classes kax/* e modelos claude-*",
+        )
     }
-    dispatch(&st, &headers, &translated, Wire::Anthropic, meta).await
 }
 
 /// O que recusar sem gastar cota. `count_tokens` não passa por aqui: lá `max_tokens`

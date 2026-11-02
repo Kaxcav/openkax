@@ -1699,3 +1699,71 @@ fn production_toml_has_no_aliases() {
     let table: toml::Table = text.parse().unwrap();
     assert!(!table.contains_key("aliases"), "{:?}", table.get("aliases"));
 }
+
+/// Modelos que não são `kax/*` nem `claude-*` (como gpt-4o ou kax-coder sem barra)
+/// recebem 404 no formato Anthropic e o mock da Anthropic recebe 0 requests.
+#[tokio::test]
+async fn invalid_model_scope_returns_404_without_touching_upstream() {
+    let anth = MockServer::start().await;
+    let gw = Gateway::spawn(&passthrough_config(&anth.uri(), ""), SECRETS).await;
+
+    for model in ["gpt-4o", "kax-coder"] {
+        // /v1/messages
+        let r = post(
+            &gw,
+            "/v1/messages",
+            CLIENT_HEADERS,
+            req_body(model, true, "oi").to_string().into_bytes(),
+        )
+        .await;
+        r.assert_error(404, "not_found_error");
+        assert!(
+            r.text
+                .contains("esta rota aceita apenas classes kax/* e modelos claude-*"),
+            "{model} /v1/messages: {}",
+            r.text
+        );
+
+        // /v1/messages/count_tokens
+        let body = json!({ "model": model, "messages": [] });
+        let r = post(
+            &gw,
+            "/v1/messages/count_tokens",
+            CLIENT_HEADERS,
+            body.to_string().into_bytes(),
+        )
+        .await;
+        r.assert_error(404, "not_found_error");
+        assert!(
+            r.text
+                .contains("esta rota aceita apenas classes kax/* e modelos claude-*"),
+            "{model} /v1/messages/count_tokens: {}",
+            r.text
+        );
+    }
+
+    assert_eq!(anth.received_requests().await.unwrap().len(), 0);
+}
+
+/// Models rejeitados fora de kax/* e claude-* registram Outcome::Rejected no ledger.
+#[tokio::test]
+async fn invalid_model_scope_records_rejected_in_ledger() {
+    let anth = MockServer::start().await;
+    let dir = tempdir("rejected-model");
+    let gw = spawn_with_ledger(&passthrough_config(&anth.uri(), ""), SECRETS, dir.clone()).await;
+
+    let r = post(
+        &gw,
+        "/v1/messages",
+        CLIENT_HEADERS,
+        req_body("gpt-4o", true, "oi").to_string().into_bytes(),
+    )
+    .await;
+    r.assert_error(404, "not_found_error");
+
+    let lines = ledger_lines(&dir, 1).await;
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["route"], "gpt-4o");
+    assert_eq!(lines[0]["outcome"], "rejected");
+    assert_eq!(anth.received_requests().await.unwrap().len(), 0);
+}
