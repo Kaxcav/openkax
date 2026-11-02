@@ -14,7 +14,7 @@ Modo B (MCP com pacote enxuto) é o principal. Modo A (rewrite de modelo via `AN
 ## Fase atual
 **Fase 0 — Core do gateway.** Critério de saída: 4 testes de fallback com `wiremock` passando (429→próximo; timeout 1º token→próximo; erro pós-1º-token→encerra limpo; TPM insuficiente→provider pulado sem request), Continue/Cline funcionando via classes, binário < 8 MB.
 Não iniciar Fase 1 antes disso. Atualize esta seção ao mudar de fase.
-Progresso (2026-11-02): scheduler/dispatcher/ledger prontos (ADR 0003); testes de fallback passando com wiremock; release Linux 3,4 MB, RSS ~6 MB. Falta: hot-reload + snapshot dos buckets, IDs de Groq/GitHub (bloqueio de rede no notebook), WindowsPlatform + CI `.exe`, smoke real por provider, aceite com Continue/Cline. Ver `tasks.json`.
+Progresso (2026-11-02): scheduler/dispatcher/ledger + providers de cauda (ADR 0003/0004); 13 testes de integração wiremock passando; smoke real pelo gateway feito (docs/smoke/2026-11-02-f0-14.md); release Linux 3,47 MB. Falta: hot-reload + snapshot dos buckets, IDs Groq/GitHub/Cloudflare, chave Vercel, WindowsPlatform + CI `.exe`, aceite com Continue/Cline. Ver `tasks.json`.
 
 ## Ambientes (ver ADR 0001)
 - **Dev e testes rodam em Linux** (WSL2 Ubuntu no notebook; o repo fica em `~/openkax`, ext4). Todos os comandos que você propuser são **bash em Linux**, nunca PowerShell.

@@ -167,6 +167,8 @@ impl Pick {
 pub struct PickOptions {
     /// Famílias (`models[].family`) fora da rota; comparação sem caixa.
     pub exclude_families: Vec<String>,
+    /// Teto de tier (`x-openkax-max-tier`): degraus acima viram `Excluded`.
+    pub max_tier: Option<crate::config::Tier>,
 }
 
 /// Falha de `pick_pinned` (header de depuração `x-openkax-pin`).
@@ -730,6 +732,13 @@ impl Scheduler {
                     .push((i, Skip::Disabled(DisabledReason::Unsupported)));
                 continue;
             };
+            if opts
+                .max_tier
+                .is_some_and(|t| self.shared.providers[pi].tier > t)
+            {
+                pick.skipped.push((i, Skip::Excluded));
+                continue;
+            }
             let family = self.shared.providers[pi].models[mi].family.as_deref();
             if family.is_some_and(|f| {
                 opts.exclude_families

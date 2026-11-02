@@ -49,11 +49,15 @@ quirks = { tpm_counts_max_tokens = true, max_tokens_cap = 2000 }
 id = "mistral"
 base_url = "https://api.mistral.ai/v1"
 auth = { kind = "bearer", env = "MISTRAL_API_KEY" }
+# Smoke 2026-11-02 (headers reais): limites são POR MODELO.
+#   codestral:      x-ratelimit-limit-req-minute=125, x-ratelimit-limit-tokens-minute=625000
+#   mistral-medium: x-ratelimit-limit-req-minute=0 → indisponível no free tier; fora das rotas.
 models = [
-  { id = "codestral", upstream = "codestral-latest", family = "mistral" },
+  { id = "codestral", upstream = "codestral-latest", family = "mistral", limits = { rpm = 125, tpm = 625000 } },
   { id = "mistral-medium", upstream = "mistral-medium-latest", family = "mistral" },
 ]
-limits = { rpm = 2, tpm = 500000, tokens_per_month = 1000000000 }
+limits = { tokens_per_month = 1000000000 }
+quirks = { ratelimit_headers = { rpm = "x-ratelimit-remaining-req-minute", tpm = "x-ratelimit-remaining-tokens-minute" } }
 
 [[provider]]
 id = "github"
@@ -99,9 +103,9 @@ id = "nvidia"
 base_url = "https://integrate.api.nvidia.com/v1"
 auth = { kind = "bearer", env = "NVIDIA_API_KEY" }
 # 40 RPM por conta. Natureza dos créditos incerta: o doctor mede. Sem max_ctx no /models.
+# Smoke 2026-11-02: moonshotai/kimi-k2.6 aparece em /models mas responde 404 → removido.
 models = [
   { id = "minimax-m3.1-flash", upstream = "minimaxai/minimax-m3.1-flash", family = "minimax" },
-  { id = "kimi-k2.6", upstream = "moonshotai/kimi-k2.6", family = "kimi" },
   { id = "deepseek-v4.1-flash", upstream = "deepseek-ai/deepseek-v4.1-flash", family = "deepseek" },
   { id = "gpt-oss-20b", upstream = "openai/gpt-oss-20b", family = "gpt" },
 ]
@@ -196,7 +200,7 @@ max_packet_tokens = 60000
 # Haiku (pago) como degrau explícito entra na Fase 1, junto com o translator.
 route = [
   { provider = "gemini", model = "gemini-flash" },
-  { provider = "nvidia", model = "kimi-k2.6" },
+  { provider = "nvidia", model = "minimax-m3.1-flash" },
   { provider = "mistral", model = "codestral" },
   { provider = "zai", model = "glm-4.7-flash" },
   { provider = "github", model = "github-mini" },
@@ -209,8 +213,9 @@ route = [
 [[class]]
 id = "kax/reviewer"
 max_packet_tokens = 60000
+# mistral-medium tem 0 RPM no free tier (smoke): Mistral entra com codestral.
 route = [
-  { provider = "mistral", model = "mistral-medium" },
+  { provider = "mistral", model = "codestral" },
   { provider = "cohere", model = "command-a-plus" },
   { provider = "zai", model = "glm-4.7-flash" },
   { provider = "nvidia", model = "deepseek-v4.1-flash" },
@@ -235,6 +240,6 @@ max_packet_tokens = 500000
 # nvidia sem max_ctx publicado: o 400 de contexto vira request_fault (A3) e não cooldown.
 route = [
   { provider = "gemini", model = "gemini-flash" },
-  { provider = "mistral", model = "mistral-medium" },
+  { provider = "mistral", model = "codestral" },
   { provider = "nvidia", model = "minimax-m3.1-flash" },
 ]

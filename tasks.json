@@ -85,9 +85,9 @@
     },
     {
       "id": "F0-14",
-      "title": "Smoke test real por provider (1 request curta) antes do aceite com Continue/Cline",
+      "title": "Smoke real pelo gateway (docs/smoke/2026-11-02-f0-14.md)",
       "owner": "lead",
-      "status": "in_progress"
+      "status": "done"
     },
     {
       "id": "F0-15",
@@ -99,6 +99,24 @@
       "id": "F0-16",
       "title": "Preencher VERCEL_AI_GATEWAY_KEY e CLOUDFLARE_API_TOKEN no .env; habilitar cloudflare com IDs conferidos",
       "owner": "user",
+      "status": "todo"
+    },
+    {
+      "id": "F0-17",
+      "title": "Decidir: cooldown de 5xx/timeout no escopo do modelo quando ele tem limits próprios (Gemini flash derrubou flash-lite)",
+      "owner": "user",
+      "status": "todo"
+    },
+    {
+      "id": "F0-18",
+      "title": "Gemini flash-latest: timeout de 1º token (8s) sem deltas de raciocínio — investigar reasoning_effort documentado",
+      "owner": "lead",
+      "status": "todo"
+    },
+    {
+      "id": "F0-19",
+      "title": "Cohere command-a-plus: conteúdo começa com 'The user says…' mesmo com reasoning_effort=none — investigar",
+      "owner": "lead",
       "status": "todo"
     }
   ]

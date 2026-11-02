@@ -11,6 +11,7 @@
 //!   seguidos → status do upstream devolvido ao cliente (ADR 0003, A3).
 //! - Deltas de raciocínio nunca chegam ao cliente (ADR 0004, N4).
 //! - `x-openkax-exclude-family: glm,qwen` tira famílias da rota (N5).
+//! - `x-openkax-max-tier: free` tira degraus credit/paid da rota.
 //! - `x-openkax-pin: provider/modelo` (depuração) fixa o candidato; continua
 //!   passando por reserva/ledger; modelo desabilitado → 409. Com pin, a resposta
 //!   traz os headers de limite do upstream como `x-openkax-upstream-<nome>`.
@@ -48,6 +49,8 @@ pub use crate::provider::install_crypto_provider;
 pub const PROVIDER_HEADER: &str = "x-openkax-provider";
 /// Header de request: famílias a excluir (separadas por vírgula).
 pub const EXCLUDE_FAMILY_HEADER: &str = "x-openkax-exclude-family";
+/// Header de request: teto de tier (`free`, `credit`, `paid`).
+pub const MAX_TIER_HEADER: &str = "x-openkax-max-tier";
 /// Header de request (depuração): `provider/modelo` fixo.
 pub const PIN_HEADER: &str = "x-openkax-pin";
 
@@ -472,6 +475,19 @@ fn choose(
                 }
             });
     }
+    let max_tier = match header_str(headers, MAX_TIER_HEADER) {
+        None => None,
+        Some(v) => match serde_json::from_value::<Tier>(Value::String(v.to_ascii_lowercase())) {
+            Ok(t) => Some(t),
+            Err(_) => {
+                return Err(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request_error",
+                    "x-openkax-max-tier deve ser free, credit ou paid",
+                ));
+            }
+        },
+    };
     let opts = PickOptions {
         exclude_families: header_str(headers, EXCLUDE_FAMILY_HEADER)
             .map(|v| {
@@ -481,6 +497,7 @@ fn choose(
                     .collect()
             })
             .unwrap_or_default(),
+        max_tier,
     };
     st.scheduler()
         .pick_with(&req.model, req, &opts)

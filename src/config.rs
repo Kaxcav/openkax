@@ -703,10 +703,12 @@ mod tests {
         assert_eq!(flash.max_ctx, Some(1_000_000));
         assert_eq!(gemini.quirks.tool_choice, Some(ToolChoiceQuirk::AutoOnly));
 
-        // Mistral limita por conta: escopo de provider.
+        // Mistral: headers reais do smoke mostraram limite por modelo.
         let mistral = c.provider("mistral").unwrap();
-        assert_eq!(mistral.limits.rpm, Some(2));
-        assert!(mistral.models.iter().all(|m| m.limits.is_none()));
+        assert!(mistral.limits.rpm.is_none());
+        let codestral = mistral.model("codestral").unwrap();
+        assert_eq!(codestral.limits.as_ref().unwrap().rpm, Some(125));
+        assert!(mistral.quirks.ratelimit_headers.rpm.is_some());
 
         let groq = c.provider("groq").unwrap();
         assert!(groq.quirks.tpm_counts_max_tokens);

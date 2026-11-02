@@ -755,6 +755,7 @@ fn exclude_family_filters_candidates_without_retry_hint() {
     "#);
     let opts = PickOptions {
         exclude_families: vec!["GLM".into(), "qwen".into()],
+        max_tier: None,
     };
     let p = f.s.pick_with("kax/t", &req(10), &opts).unwrap();
     assert_eq!(p.skipped, vec![(0, Skip::Excluded), (1, Skip::Excluded)]);
@@ -831,4 +832,52 @@ impl Fx {
         drop(r);
         self.only(&req(10))
     }
+}
+
+#[test]
+fn max_tier_excludes_credit_and_paid_steps() {
+    let f = fx(r#"
+        [[provider]]
+        id = "free"
+        base_url = "http://f"
+        auth = { kind = "none" }
+        models = [{ id = "m", upstream = "m" }]
+
+        [[provider]]
+        id = "cred"
+        base_url = "http://c"
+        auth = { kind = "none" }
+        tier = "credit"
+        models = [{ id = "m", upstream = "m" }]
+
+        [[provider]]
+        id = "pago"
+        base_url = "http://p"
+        auth = { kind = "none" }
+        tier = "paid"
+        models = [{ id = "m", upstream = "m" }]
+
+        [[class]]
+        id = "kax/t"
+        max_packet_tokens = 100000
+        route = [{ provider = "free", model = "m" }, { provider = "cred", model = "m" }, { provider = "pago", model = "m" }]
+    "#);
+    let only_free = PickOptions {
+        max_tier: Some(crate::config::Tier::Free),
+        ..Default::default()
+    };
+    let p = f.s.pick_with("kax/t", &req(10), &only_free).unwrap();
+    assert_eq!(p.candidates.len(), 1);
+    assert_eq!(p.skipped, vec![(1, Skip::Excluded), (2, Skip::Excluded)]);
+    let upto_credit = PickOptions {
+        max_tier: Some(crate::config::Tier::Credit),
+        ..Default::default()
+    };
+    assert_eq!(
+        f.s.pick_with("kax/t", &req(10), &upto_credit)
+            .unwrap()
+            .candidates
+            .len(),
+        2
+    );
 }
