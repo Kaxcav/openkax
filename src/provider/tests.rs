@@ -568,7 +568,6 @@ fn signature(sig: &str) -> Value {
 }
 
 #[test]
-#[ignore = "F1-2"]
 fn strip_images_swaps_each_image_for_a_notice() {
     let image =
         json!({ "type": "image_url", "image_url": { "url": "data:image/png;base64,QQ==" } });
@@ -594,7 +593,6 @@ fn strip_images_swaps_each_image_for_a_notice() {
 
 /// Provider sem o quirk não recebe `extra_content`: há quem recuse campo extra.
 #[test]
-#[ignore = "F1-2"]
 fn extra_content_only_reaches_providers_with_thought_signatures() {
     let msgs = json!([{ "role": "assistant", "content": null, "tool_calls": [call("c1", signature("S"))] }]);
     assert_eq!(
@@ -611,7 +609,6 @@ fn extra_content_only_reaches_providers_with_thought_signatures() {
 /// 1ª chamada de cada mensagem recebe o valor neutro que a doc do Gemini aceita;
 /// as paralelas seguintes ficam sem.
 #[test]
-#[ignore = "F1-2"]
 fn missing_signature_gets_the_documented_neutral_value() {
     let got = upstream_messages(
         "thought_signatures = true",
@@ -627,7 +624,6 @@ fn missing_signature_gets_the_documented_neutral_value() {
 }
 
 #[test]
-#[ignore = "F1-2"]
 fn alnum9_rewrites_tool_call_ids_consistently() {
     let got = upstream_messages(
         r#"tool_call_id = "alnum9""#,
@@ -650,6 +646,58 @@ fn alnum9_rewrites_tool_call_ids_consistently() {
     for i in 0..3 {
         assert_eq!(got[i + 1]["tool_call_id"], ids[i], "mensagem tool {i}");
     }
+}
+
+/// Cada request é traduzida sozinha: o mesmo `id` tem de virar o mesmo valor sempre.
+/// O valor fixo protege sessões em andamento de uma troca de algoritmo.
+#[test]
+fn alnum9_is_stable_across_requests() {
+    let msgs = json!([{ "role": "tool", "tool_call_id": "toolu_01A", "content": "1" }]);
+    let got = upstream_messages(r#"tool_call_id = "alnum9""#, msgs.clone());
+    assert_eq!(got[0]["tool_call_id"], "5hJXTcYN8");
+    assert_eq!(upstream_messages(r#"tool_call_id = "alnum9""#, msgs), got);
+}
+
+#[test]
+fn signature_present_is_kept_and_other_extra_content_survives() {
+    let first_signed = json!([{ "role": "assistant", "content": null, "tool_calls": [
+        call("c1", signature("S")), call("c2", Value::Null),
+    ]}]);
+    assert_eq!(
+        upstream_messages("thought_signatures = true", first_signed.clone()),
+        first_signed
+    );
+    let other = json!({ "other": 1, "google": { "x": 2 } });
+    let got = upstream_messages(
+        "thought_signatures = true",
+        json!([{ "role": "assistant", "tool_calls": [call("c1", other)] }]),
+    );
+    assert_eq!(
+        got[0]["tool_calls"][0]["extra_content"],
+        json!({ "other": 1, "google": { "x": 2, "thought_signature": "skip_thought_signature_validator" } })
+    );
+}
+
+/// Forma estranha vinda de `/v1/chat/completions` não derruba: passa como veio.
+#[test]
+fn message_quirks_tolerate_odd_shapes() {
+    let msgs = json!([
+        { "role": "assistant", "tool_calls": "nada" },
+        { "role": "assistant", "tool_calls": [1, { "id": 7 }] },
+        { "role": "tool", "tool_call_id": 7, "content": "x" },
+        { "role": "user", "content": ["texto solto", { "type": "image_url" }] },
+    ]);
+    let got = upstream_messages(
+        r#"strip_images = true, tool_call_id = "alnum9", thought_signatures = true"#,
+        msgs,
+    );
+    assert_eq!(got[0]["tool_calls"], "nada");
+    assert_eq!(got[2]["tool_call_id"], 7);
+    assert_eq!(got[3]["content"][0], "texto solto");
+    assert_eq!(
+        got[3]["content"][1],
+        json!({ "type": "text", "text": "[image omitted: provider has no vision]" })
+    );
 }
 
 /// O default não altera nada que a Fase 0 já mandava.

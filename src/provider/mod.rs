@@ -727,10 +727,98 @@ pub fn build_upstream_body(
         }
     }
 
+    if let Some(Value::Array(messages)) = obj.get_mut("messages") {
+        for message in messages {
+            apply_message_quirks(q, message);
+        }
+    }
+
     for p in &q.strip_params {
         obj.remove(p);
     }
     v
+}
+
+/// Aviso que substitui a imagem com `strip_images` (ADR 0006).
+const IMAGE_OMITTED: &str = "[image omitted: provider has no vision]";
+/// Valor que a doc do Gemini aceita em chamada sem assinatura real (ADR 0006).
+const SKIP_THOUGHT_SIGNATURE: &str = "skip_thought_signature_validator";
+
+/// Quirks que mexem em cada mensagem do histórico. Forma inesperada passa como
+/// veio: o upstream é quem recusa.
+fn apply_message_quirks(q: &crate::config::Quirks, message: &mut Value) {
+    if q.strip_images
+        && let Some(Value::Array(parts)) = message.get_mut("content")
+    {
+        for part in parts {
+            if part.get("type").and_then(Value::as_str) == Some("image_url") {
+                *part = serde_json::json!({ "type": "text", "text": IMAGE_OMITTED });
+            }
+        }
+    }
+
+    if let Some(Value::Array(calls)) = message.get_mut("tool_calls") {
+        for (i, call) in calls.iter_mut().enumerate() {
+            let Some(call) = call.as_object_mut() else {
+                continue;
+            };
+            if !q.thought_signatures {
+                call.remove("extra_content");
+            } else if i == 0 {
+                ensure_thought_signature(call);
+            }
+            if q.tool_call_id.is_some()
+                && let Some(Value::String(id)) = call.get_mut("id")
+            {
+                *id = alnum9(id);
+            }
+        }
+    }
+    if q.tool_call_id.is_some()
+        && let Some(Value::String(id)) = message.get_mut("tool_call_id")
+    {
+        *id = alnum9(id);
+    }
+}
+
+/// Só a 1ª chamada de um passo precisa da assinatura (doc do Gemini). O que mais
+/// houver em `extra_content` fica.
+fn ensure_thought_signature(call: &mut serde_json::Map<String, Value>) {
+    let extra = call
+        .entry("extra_content")
+        .or_insert_with(|| serde_json::json!({}));
+    if !extra.is_object() {
+        *extra = serde_json::json!({});
+    }
+    let google = &mut extra["google"];
+    if !google.is_object() {
+        *google = serde_json::json!({});
+    }
+    if google.get("thought_signature").is_none() {
+        google["thought_signature"] = SKIP_THOUGHT_SIGNATURE.into();
+    }
+}
+
+/// `id` que já é 9 letras ou dígitos passa igual; o resto vira um hash determinístico
+/// (FNV-1a, independente da versão do Rust): cada request é reescrita sozinha, e o
+/// `id` de uma sessão em andamento tem de dar sempre o mesmo valor.
+fn alnum9(id: &str) -> String {
+    const ALPHABET: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    if id.len() == 9 && id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return id.to_owned();
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in id.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    (0..9)
+        .map(|_| {
+            let digit = ALPHABET[(hash % 62) as usize];
+            hash /= 62;
+            char::from(digit)
+        })
+        .collect()
 }
 
 /// Serializa o corpo upstream. `ascii` (quirk `ascii_json`): todo char não-ASCII

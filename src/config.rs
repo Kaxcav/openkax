@@ -758,6 +758,12 @@ mod tests {
         assert_eq!(flash.limits.as_ref().unwrap().tpm, Some(250_000));
         assert_eq!(flash.max_ctx, Some(1_000_000));
         assert_eq!(gemini.quirks.tool_choice, Some(ToolChoiceQuirk::AutoOnly));
+        // ADR 0006: Gemini 3+ dá 400 sem a assinatura; Mistral, sem `id` de 9 alfanuméricos.
+        assert!(gemini.quirks.thought_signatures);
+        assert_eq!(
+            c.provider("mistral").unwrap().quirks.tool_call_id,
+            Some(ToolCallIdQuirk::Alnum9)
+        );
 
         // Mistral: headers reais do smoke mostraram limite por modelo.
         let mistral = c.provider("mistral").unwrap();

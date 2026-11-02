@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::scheduler::estimate_tokens;
-use crate::translate::openai::{ChunkChoice, Delta};
+use crate::translate::openai::{ChatCompletionRequest, ChunkChoice, Delta};
 
 const CLAUDE_CODE: &str =
     include_str!("../../../tests/fixtures/anthropic/claude_code_request.json");
@@ -268,7 +268,6 @@ fn error_body_has_the_anthropic_shape() {
 // ------------------------------------------------------------- request (F1-2)
 
 #[test]
-#[ignore = "F1-2"]
 fn system_string_and_blocks_become_one_system_message_without_cache_control() {
     let s = translate(json!({
         "model": "kax/x", "max_tokens": 1, "system": "regras",
@@ -297,7 +296,6 @@ fn system_string_and_blocks_become_one_system_message_without_cache_control() {
 }
 
 #[test]
-#[ignore = "F1-2"]
 fn text_blocks_join_into_a_string() {
     let v = with_messages(json!([{ "role": "user", "content": [
         { "type": "text", "text": "a", "cache_control": { "type": "ephemeral" } },
@@ -310,7 +308,6 @@ fn text_blocks_join_into_a_string() {
 }
 
 #[test]
-#[ignore = "F1-2"]
 fn images_become_image_url_parts_in_order() {
     let v = with_messages(json!([{ "role": "user", "content": [
         { "type": "text", "text": "veja" },
@@ -329,7 +326,6 @@ fn images_become_image_url_parts_in_order() {
 }
 
 #[test]
-#[ignore = "F1-2"]
 fn tool_use_becomes_assistant_tool_calls() {
     let v = with_messages(json!([
         { "role": "assistant", "content": [
@@ -356,7 +352,6 @@ fn tool_use_becomes_assistant_tool_calls() {
 }
 
 #[test]
-#[ignore = "F1-2"]
 fn tool_results_become_tool_messages_before_the_user_text() {
     let v = with_messages(json!([{ "role": "user", "content": [
         { "type": "text", "text": "antes" },
@@ -380,7 +375,6 @@ fn tool_results_become_tool_messages_before_the_user_text() {
 }
 
 #[test]
-#[ignore = "F1-2"]
 fn tool_result_is_error_is_kept_in_the_text() {
     let v = with_messages(json!([{ "role": "user", "content": [
         { "type": "tool_result", "tool_use_id": "t1", "content": "sem arquivo", "is_error": true },
@@ -394,7 +388,6 @@ fn tool_result_is_error_is_kept_in_the_text() {
 /// A mensagem `tool` do OpenAI só leva texto: a imagem vai numa mensagem `user`
 /// logo depois dos resultados.
 #[test]
-#[ignore = "F1-2"]
 fn image_inside_tool_result_moves_to_a_user_message() {
     let v = with_messages(json!([{ "role": "user", "content": [
         { "type": "tool_result", "tool_use_id": "t1", "content": [
@@ -414,7 +407,6 @@ fn image_inside_tool_result_moves_to_a_user_message() {
 }
 
 #[test]
-#[ignore = "F1-2"]
 fn tools_become_functions_and_server_tools_are_dropped() {
     let v = translate(json!({
         "model": "kax/x", "max_tokens": 1, "messages": [user("oi")],
@@ -434,7 +426,6 @@ fn tools_become_functions_and_server_tools_are_dropped() {
 }
 
 #[test]
-#[ignore = "F1-2"]
 fn tool_choice_table() {
     let tools = json!([{ "name": "Read", "input_schema": { "type": "object" } }]);
     for (choice, want) in [
@@ -456,7 +447,6 @@ fn tool_choice_table() {
 }
 
 #[test]
-#[ignore = "F1-2"]
 fn disable_parallel_tool_use_maps_to_parallel_tool_calls_false() {
     let v = translate(json!({
         "model": "kax/x", "max_tokens": 1, "messages": [user("oi")],
@@ -469,7 +459,6 @@ fn disable_parallel_tool_use_maps_to_parallel_tool_calls_false() {
 
 /// OpenAI recusa `tool_choice` sem `tools`; server tools sozinhas contam como sem tools.
 #[test]
-#[ignore = "F1-2"]
 fn tool_choice_without_usable_tools_is_omitted() {
     for tools in [
         json!([]),
@@ -486,7 +475,6 @@ fn tool_choice_without_usable_tools_is_omitted() {
 
 /// Mensagem `user` que fica vazia não é enviada (conteúdo `[]` dá 400 no upstream).
 #[test]
-#[ignore = "F1-2"]
 fn user_message_left_empty_is_omitted() {
     let v = with_messages(json!([
         { "role": "user", "content": [{ "type": "document", "source": { "type": "base64", "data": "x" } }] },
@@ -498,7 +486,6 @@ fn user_message_left_empty_is_omitted() {
 /// A assinatura vem dentro do `tool_use.id` e volta para onde o Gemini espera; o
 /// `id` limpo vale nas duas pontas (ADR 0006). Só a 1ª chamada paralela tem.
 #[test]
-#[ignore = "F1-2"]
 fn signature_in_the_id_goes_back_to_extra_content() {
     let signed = format!("c1{TOOL_ID_SIGNATURE_SEP}{}", "5349472b2f3d"); // "SIG+/="
     assert_eq!(
@@ -544,7 +531,6 @@ fn signature_in_the_id_goes_back_to_extra_content() {
 }
 
 #[test]
-#[ignore = "F1-2"]
 fn thinking_and_unknown_blocks_are_dropped() {
     let v = with_messages(json!([
         user("oi"),
@@ -569,7 +555,6 @@ fn thinking_and_unknown_blocks_are_dropped() {
 }
 
 #[test]
-#[ignore = "F1-2"]
 fn scalar_params_map_and_the_rest_is_dropped() {
     let v = translate(json!({
         "model": "kax/x",
@@ -601,7 +586,6 @@ fn scalar_params_map_and_the_rest_is_dropped() {
 }
 
 #[test]
-#[ignore = "F1-2"]
 fn claude_code_fixture_translates_whole() {
     let mut raw: Value = serde_json::from_str(CLAUDE_CODE).unwrap();
     // System grande (> 6k tokens), como o do Claude Code.
@@ -646,6 +630,90 @@ fn claude_code_fixture_translates_whole() {
     // O tipo OpenAI que sai é o que o scheduler estima.
     let req: ChatCompletionRequest = serde_json::from_value(v).unwrap();
     assert!(estimate_tokens(&req, 4.0) > 6000);
+}
+
+/// Imagem de `tool_result` e texto do usuário na mesma mensagem: uma `user` só,
+/// sem duas seguidas, com a imagem da tool antes do que o usuário escreveu.
+#[test]
+fn tool_result_image_and_user_content_share_one_user_message() {
+    let v = with_messages(json!([{ "role": "user", "content": [
+        { "type": "text", "text": "analise" },
+        { "type": "tool_result", "tool_use_id": "t1", "is_error": true, "content": [
+            { "type": "image", "source": { "type": "url", "url": "https://x/tool.png" } },
+        ]},
+        { "type": "image", "source": { "type": "url", "url": "https://x/user.png" } },
+    ]}]));
+    assert_eq!(
+        v["messages"],
+        json!([
+            { "role": "tool", "tool_call_id": "t1", "content": TOOL_ERROR_PREFIX },
+            { "role": "user", "content": [
+                { "type": "image_url", "image_url": { "url": "https://x/tool.png" } },
+                { "type": "text", "text": "analise" },
+                { "type": "image_url", "image_url": { "url": "https://x/user.png" } },
+            ]},
+        ])
+    );
+}
+
+/// `tool_choice` forçando uma tool que não virou function daria 400 no upstream.
+#[test]
+fn tool_choice_naming_a_dropped_tool_is_omitted() {
+    let v = translate(json!({
+        "model": "kax/x", "max_tokens": 1, "messages": [user("oi")],
+        "tools": [
+            { "name": "Read", "input_schema": { "type": "object" } },
+            { "type": "web_search_20250305", "name": "web_search" },
+        ],
+        "tool_choice": { "type": "tool", "name": "web_search", "disable_parallel_tool_use": true },
+    }));
+    assert_eq!(v["tools"].as_array().unwrap().len(), 1);
+    assert!(v.get("tool_choice").is_none(), "{v}");
+    assert!(v.get("parallel_tool_calls").is_none(), "{v}");
+}
+
+#[test]
+fn empty_text_and_empty_system_are_not_sent() {
+    let v = translate(json!({
+        "model": "kax/x", "max_tokens": 1, "system": [{ "type": "text", "text": "" }],
+        "messages": [
+            user(""),
+            { "role": "assistant", "content": "" },
+            { "role": "user", "content": [
+                { "type": "text", "text": "" },
+                { "type": "text", "text": "oi" },
+            ]},
+        ],
+    }));
+    assert_eq!(v["messages"], json!([user("oi")]));
+    let s = translate(
+        json!({ "model": "kax/x", "max_tokens": 1, "system": "", "messages": [user("oi")] }),
+    );
+    assert_eq!(s["messages"], json!([user("oi")]));
+}
+
+/// `input: null` geraria `arguments: "null"`, que o upstream não aceita como objeto.
+#[test]
+fn null_tool_input_becomes_empty_arguments() {
+    let v = with_messages(json!([{ "role": "assistant", "content": [
+        { "type": "tool_use", "id": "t1", "name": "Ls", "input": null },
+    ]}]));
+    assert_eq!(
+        v["messages"][0]["tool_calls"][0]["function"]["arguments"],
+        "{}"
+    );
+}
+
+#[test]
+fn malformed_signature_suffix_stays_in_the_id() {
+    for id in [
+        format!("c1{TOOL_ID_SIGNATURE_SEP}"),
+        format!("c1{TOOL_ID_SIGNATURE_SEP}abc"),
+        format!("c1{TOOL_ID_SIGNATURE_SEP}ff"), // hexadecimal, mas não é UTF-8
+        format!("{TOOL_ID_SIGNATURE_SEP}5349"),
+    ] {
+        assert_eq!(decode_tool_use_id(&id), (id.clone(), None));
+    }
 }
 
 // -------------------------------------------------------------- stream (F1-3)

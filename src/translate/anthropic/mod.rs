@@ -6,15 +6,18 @@
 //! [`ContentBlock::Unknown`]. O passthrough de `claude-*` não passa por aqui:
 //! ele repassa os bytes do cliente.
 //!
-//! CONTRACT (F1-1): [`to_openai_request`], [`OpenAiToAnthropicStream`] e
-//! [`collect_response`] ainda são stubs; os testes de aceite estão com
-//! `#[ignore = "F1-…"]` até a tarefa de cada um.
+//! CONTRACT (F1-1): [`OpenAiToAnthropicStream`], [`encode_tool_use_id`] e
+//! [`collect_response`] ainda são stubs (F1-3); os testes de aceite deles estão
+//! com `#[ignore = "F1-3"]`.
 
 use bytes::Bytes;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
-use super::openai::{ChatCompletionChunk, ChatCompletionRequest, Usage};
+use super::openai::{ChatCompletionChunk, Usage};
+
+mod request;
+pub use request::to_openai_request;
 
 /// Prefixo do texto de um `tool_result` com `is_error: true`: a mensagem `tool`
 /// do OpenAI não tem campo para isso.
@@ -347,18 +350,6 @@ pub fn encode_sse(event: &StreamEvent) -> Bytes {
 
 // ---------------------------------------------------------------- tradução
 
-/// Anthropic → OpenAI. `model` continua sendo a classe; quem troca pelo modelo
-/// do degrau é o despacho. Stub do CONTRACT (F1-2).
-pub fn to_openai_request(req: &MessagesRequest) -> ChatCompletionRequest {
-    ChatCompletionRequest {
-        model: req.model.clone(),
-        messages: Vec::new(),
-        stream: req.stream,
-        max_tokens: req.max_tokens,
-        extra: Map::new(),
-    }
-}
-
 /// Junta o `id` do upstream e a assinatura de raciocínio no `tool_use.id` que vai
 /// ao cliente. Sem assinatura, o `id` passa igual. Stub do CONTRACT (F1-3).
 pub fn encode_tool_use_id(id: &str, _signature: Option<&str>) -> String {
@@ -366,9 +357,32 @@ pub fn encode_tool_use_id(id: &str, _signature: Option<&str>) -> String {
 }
 
 /// Inverso de [`encode_tool_use_id`]: `id` original e assinatura, se havia.
-/// Stub do CONTRACT (F1-2).
+/// Sufixo que não é hexadecimal de um texto UTF-8 não é nosso: o `id` fica como veio.
 pub fn decode_tool_use_id(id: &str) -> (String, Option<String>) {
-    (id.to_owned(), None)
+    let decoded = id
+        .rsplit_once(TOOL_ID_SIGNATURE_SEP)
+        .filter(|(clean, _)| !clean.is_empty())
+        .and_then(|(clean, hex)| Some((clean, decode_hex(hex)?)));
+    match decoded {
+        Some((clean, signature)) => (clean.to_owned(), Some(signature)),
+        None => (id.to_owned(), None),
+    }
+}
+
+fn decode_hex(hex: &str) -> Option<String> {
+    if hex.is_empty() || !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let bytes = hex
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let hi = char::from(pair[0]).to_digit(16)?;
+            let lo = char::from(pair[1]).to_digit(16)?;
+            u8::try_from(hi * 16 + lo).ok()
+        })
+        .collect::<Option<Vec<u8>>>()?;
+    String::from_utf8(bytes).ok()
 }
 
 /// Identificação da resposta que o tradutor de stream vai montar.

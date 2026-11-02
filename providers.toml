@@ -27,7 +27,7 @@ models = [
   { id = "gemini-flash", upstream = "gemini-flash-latest", max_ctx = 1000000, limits = { rpm = 10, tpm = 250000, rpd = 250 }, family = "gemini", first_token_timeout_ms = 20000 },
   { id = "gemini-flash-lite", upstream = "gemini-flash-lite-latest", max_ctx = 1000000, limits = { rpm = 10, tpm = 250000, rpd = 250 }, family = "gemini" },
 ]
-quirks = { strip_params = ["logprobs", "frequency_penalty"], tool_choice = "auto_only" }
+quirks = { strip_params = ["logprobs", "frequency_penalty"], tool_choice = "auto_only", thought_signatures = true }
 # Sem reasoning_effort (F0-18): em 2026-11-02 gemini-flash-latest = gemini-3.8-flash
 # (modelVersion), e a tabela da doc de compatibilidade OpenAI só define valores para
 # Gemini 4 Argon, 3.1 Flash-Lite, 3 Flash e 2.5. Reavaliar quando a doc citar o 3.8.
@@ -62,7 +62,7 @@ models = [
   { id = "mistral-medium", upstream = "mistral-medium-latest", family = "mistral" },
 ]
 limits = { tokens_per_month = 1000000000 }
-quirks = { ratelimit_headers = { rpm = "x-ratelimit-remaining-req-minute", tpm = "x-ratelimit-remaining-tokens-minute" } }
+quirks = { ratelimit_headers = { rpm = "x-ratelimit-remaining-req-minute", tpm = "x-ratelimit-remaining-tokens-minute" }, tool_call_id = "alnum9" }
 
 [[provider]]
 id = "openrouter"
