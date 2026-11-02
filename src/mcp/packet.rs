@@ -539,10 +539,7 @@ mod tests {
         }
         // Um arquivo válido e outro fora: a resposta inteira é recusada.
         let mix = format!("{GOOD}{}", diff_for("src/b.rs"));
-        assert_eq!(
-            parse_response(&mix, &p).unwrap_err().code(),
-            "out_of_scope"
-        );
+        assert_eq!(parse_response(&mix, &p).unwrap_err().code(), "out_of_scope");
     }
 
     #[test]

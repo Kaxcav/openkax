@@ -167,6 +167,13 @@
       "owner": "lead",
       "status": "done",
       "note": "120 unitários (+10 de packet) + 3 mcp_contract (+3 #[ignore] F2-3/F2-4/F2-5 seguem de propósito: execução ponta a ponta depende do runner). System prompt PT-BR v1 (ADR 0007)"
+    },
+    {
+      "id": "F2-4",
+      "title": "Aplicar diff e verificar no worktree: apply_diff (git apply --index) + run_verify em src/verify.rs",
+      "owner": "lead",
+      "status": "done",
+      "note": "128 unitários (+8 de runner com repo tempfile) + 3 mcp_contract (+3 #[ignore] seguem). Timeout mata a árvore (taskkill /T no Windows, kill -KILL do grupo no Unix); log mantém o fim. Seleção de comandos por glob do verify.toml ainda não ligada ao runner"
     }
   ]
 }
