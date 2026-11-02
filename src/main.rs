@@ -115,9 +115,13 @@ async fn mcp() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load(&path)?;
     let secrets = Secrets::from_env(&config);
     let mut deps = Deps::new(config, secrets);
-    deps.ledger = ledger::spawn(platform::current().ledger_dir(), 256);
+    let ledger_dir = platform::current().ledger_dir();
+    deps.ledger = ledger::spawn(ledger_dir.clone(), 256);
     let state = AppState::new(deps)?;
-    openkax::mcp::KaxWorkers::new(state).serve_stdio().await
+    openkax::mcp::KaxWorkers::new(state)
+        .with_ledger_dir(ledger_dir)
+        .serve_stdio()
+        .await
 }
 
 fn run_serve() -> ExitCode {

@@ -69,8 +69,13 @@ respondem `not_implemented`. Execução entra em F2-2 em diante.
   (o status `rejected` não é produzido; worktree sempre preservado).
 - **Aceita:** commit `kax(<id>): <objective>` no worktree (identidade `openkax`),
   branch `kax/<id>` para o lead integrar. Ledger `kind:"task"` por tarefa.
-- `delegate` está ligada; `delegate_batch`, `status` e `report` seguem
-  `not_implemented`.
+- **Lote (F2-6):** `delegate_batch` registra o lote, devolve na hora `batch_id` com
+  todas as tarefas em `queued` e roda em background com semáforo de `parallelism`
+  (padrão 4, máximo 16). `status(batch_id)` mostra o estado por tarefa
+  (`queued|running|accepted|needs_lead`; `rejected` segue sem uso) e `peak_running`.
+  O registro é só em memória (32 lotes; o ledger é o histórico durável); lote
+  desconhecido → erro `not_found`. `report(period)` (day|week|month) agrega as
+  linhas `kind:"task"` do ledger por classe e por provider.
 
 ## Consequências
 

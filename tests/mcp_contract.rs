@@ -192,9 +192,8 @@ fn quota_returns_real_scheduler_snapshot() {
 }
 
 #[test]
-fn delegate_batch_validates_then_reports_not_implemented() {
+fn delegate_batch_validates_input() {
     let mut mcp = Mcp::spawn();
-
     let bad = mcp.call(
         "delegate_batch",
         json!({ "repo": "/r", "base_ref": "main", "tasks": [packet("T-1"), packet("T-1")] }),
@@ -202,18 +201,59 @@ fn delegate_batch_validates_then_reports_not_implemented() {
     assert_eq!(bad["result"]["isError"], json!(true), "{bad}");
     assert_eq!(text_of(&bad)["error"]["code"], "invalid_input");
 
+    let too_wide = mcp.call(
+        "delegate_batch",
+        json!({ "repo": "/r", "base_ref": "main", "tasks": [packet("T-1")], "parallelism": 17 }),
+    );
+    assert_eq!(text_of(&too_wide)["error"]["code"], "invalid_input");
+}
+
+/// Devolve na hora com tudo `queued`; o `status` acaba mostrando o resultado
+/// (repo inexistente → `needs_lead`, sem tocar em provider).
+#[test]
+fn delegate_batch_returns_queued_then_status_shows_results() {
+    let mut mcp = Mcp::spawn();
     let ok = mcp.call(
         "delegate_batch",
-        json!({ "repo": "/r", "base_ref": "main", "tasks": [packet("T-1")] }),
+        json!({ "repo": "/nao/existe/repo", "base_ref": "main", "tasks": [packet("T-1"), packet("T-2")] }),
     );
-    assert_eq!(ok["result"]["isError"], json!(true), "{ok}");
-    let err = text_of(&ok);
-    assert_eq!(err["error"]["code"], "not_implemented");
+    assert_ne!(ok["result"]["isError"], json!(true), "{ok}");
+    let first = text_of(&ok);
+    let id = first["batch_id"].as_str().expect("batch_id").to_owned();
+    assert_eq!(first["total"], 2);
     assert!(
-        err["error"]["message"]
-            .as_str()
-            .is_some_and(|m| m.contains("não implementado na etapa F2-1"))
+        first["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["state"] == "queued")
     );
+
+    let mut last = Value::Null;
+    for _ in 0..200 {
+        last = text_of(&mcp.call("status", json!({ "batch_id": id })));
+        if last["state"] == "done" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(last["state"], "done", "{last}");
+    assert_eq!(last["results"].as_array().unwrap().len(), 2);
+    assert!(
+        last["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["state"] == "needs_lead")
+    );
+}
+
+#[test]
+fn status_of_unknown_batch_is_not_found() {
+    let mut mcp = Mcp::spawn();
+    let resp = mcp.call("status", json!({ "batch_id": "B-nada" }));
+    assert_eq!(resp["result"]["isError"], json!(true), "{resp}");
+    assert_eq!(text_of(&resp)["error"]["code"], "not_found");
 }
 
 // --- Aceite das próximas etapas (falham de propósito até serem ligados) ---
@@ -226,13 +266,15 @@ async fn delegate_returns_accepted_result() {
     use wiremock::{Mock, MockServer};
 
     let diff = |v: &str| {
-        format!("```diff
+        format!(
+            "```diff
 --- a/value.txt
 +++ b/value.txt
 @@ -1 +1 @@
 -OLD
 +{v}
-```")
+```"
+        )
     };
     let (groq, gemini) = (MockServer::start().await, MockServer::start().await);
     for (server, text) in [(&groq, diff("BAD")), (&gemini, diff("GOOD"))] {
@@ -257,14 +299,22 @@ async fn delegate_returns_accepted_result() {
         assert!(st.success(), "git {args:?}");
     };
     git(&["init", "-q", "-b", "main"]);
-    std::fs::write(repo.path().join("value.txt"), "OLD
-").unwrap();
+    std::fs::write(
+        repo.path().join("value.txt"),
+        "OLD
+",
+    )
+    .unwrap();
     git(&["add", "."]);
     git(&["commit", "-q", "-m", "init"]);
 
     let cfg_dir = tempfile::tempdir().unwrap();
     let cfg = cfg_dir.path().join("providers.toml");
-    std::fs::write(&cfg, common::two_provider_config(&groq.uri(), &gemini.uri())).unwrap();
+    std::fs::write(
+        &cfg,
+        common::two_provider_config(&groq.uri(), &gemini.uri()),
+    )
+    .unwrap();
     let mut mcp = Mcp::spawn_with(
         cfg.to_str().unwrap(),
         &[("GROQ_API_KEY", "k-groq"), ("GEMINI_API_KEY", "k-gemini")],
@@ -295,19 +345,110 @@ async fn delegate_returns_accepted_result() {
 }
 
 #[test]
-#[ignore = "F2-4: status(batch_id) devolve o lote despachado"]
-fn status_returns_known_batch() {
-    let mut mcp = Mcp::spawn();
-    let resp = mcp.call("status", json!({ "batch_id": "B-1" }));
-    assert_ne!(resp["result"]["isError"], json!(true), "{resp}");
-    assert_eq!(text_of(&resp)["batch_id"], "B-1");
-}
-
-#[test]
-#[ignore = "F2-6: report(period) agrega o ledger"]
 fn report_returns_acceptance_by_class() {
     let mut mcp = Mcp::spawn();
     let resp = mcp.call("report", json!({ "period": "week" }));
     assert_ne!(resp["result"]["isError"], json!(true), "{resp}");
     assert!(text_of(&resp)["by_class"].is_object());
+}
+
+/// Memória privada (bytes) do processo no Windows; `None` fora dele.
+fn private_bytes(pid: u32) -> Option<u64> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-Command"])
+        .arg(format!("(Get-Process -Id {pid}).PrivateMemorySize64"))
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// Medição da F2-6 (não é critério): lote de 8 tarefas, `parallelism = 4`, mocks.
+/// Rode com `cargo test --release --test mcp_contract -- --ignored --nocapture batch_memory`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "medição manual de memória (F2-6); usa o binário do perfil de teste"]
+async fn batch_memory_probe() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer};
+
+    let diff = "```diff\n--- a/value.txt\n+++ b/value.txt\n@@ -1 +1 @@\n-OLD\n+GOOD\n```";
+    let (groq, gemini) = (MockServer::start().await, MockServer::start().await);
+    for s in [&groq, &gemini] {
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(common::sse_ok(diff).set_delay(std::time::Duration::from_millis(150)))
+            .mount(s)
+            .await;
+    }
+    let repo = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let st = Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(repo.path().join("value.txt"), "OLD\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "init"]);
+    let cfg_dir = tempfile::tempdir().unwrap();
+    let cfg = cfg_dir.path().join("providers.toml");
+    std::fs::write(
+        &cfg,
+        common::two_provider_config(&groq.uri(), &gemini.uri()),
+    )
+    .unwrap();
+
+    let mut mcp = Mcp::spawn_with(
+        cfg.to_str().unwrap(),
+        &[("GROQ_API_KEY", "k-groq"), ("GEMINI_API_KEY", "k-gemini")],
+    );
+    let pid = mcp.child.id();
+    let mib = |b: Option<u64>| {
+        b.map_or("n/d".to_owned(), |b| {
+            format!("{:.2} MiB", b as f64 / 1_048_576.0)
+        })
+    };
+    let before = private_bytes(pid);
+
+    let tasks: Vec<Value> = (0..8)
+        .map(|i| {
+            let mut t = packet(&format!("M-{i}"));
+            t["class"] = json!("kax/coder-fast");
+            t["files"] = json!([{ "path": "value.txt", "mode": "write" }]);
+            let needle = if i % 2 == 0 { "GOOD" } else { "NOPE" };
+            t["accept"] = json!({ "verify": [format!("git grep -q {needle} -- value.txt")], "expect": "exit 0" });
+            t["max_attempts"] = json!(1);
+            t
+        })
+        .collect();
+    let first = text_of(&mcp.call(
+        "delegate_batch",
+        json!({ "repo": repo.path().to_str().unwrap(), "base_ref": "main", "tasks": tasks, "parallelism": 4 }),
+    ));
+    let id = first["batch_id"].as_str().unwrap().to_owned();
+    let mut during = 0u64;
+    for _ in 0..400 {
+        during = during.max(private_bytes(pid).unwrap_or(0));
+        let s = text_of(&mcp.call("status", json!({ "batch_id": id })));
+        if s["state"] == "done" {
+            println!("pico de simultâneas: {}", s["peak_running"]);
+            break;
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_secs(12));
+    let after = private_bytes(pid);
+    println!(
+        "memória privada: antes {} | durante (pico) {} | depois (12 s) {}",
+        mib(before),
+        mib((during > 0).then_some(during)),
+        mib(after)
+    );
 }
