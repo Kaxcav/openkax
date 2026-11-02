@@ -113,6 +113,8 @@ pub struct Candidate {
     pub input_chars: usize,
     /// Tokens de entrada estimados (com `safety_factor`).
     pub est_tokens: u32,
+    /// Chars/token do modelo no momento da escolha.
+    pub chars_per_token: f64,
     /// O que será debitado no TPM/TPD: entrada (+ saída com `tpm_counts_max_tokens`).
     pub reserve_tokens: u32,
     /// `max_tokens` a enviar ao upstream quando há `max_tokens_cap`.
@@ -1081,8 +1083,8 @@ impl Scheduler {
         let mut ms = lock(&m.scope);
         ps.tick(now, utc);
         ms.scope.tick(now, utc);
-        let tokens = (f64::from(tokens_from(est.chars, est.messages, ms.chars_per_token))
-            * p.safety)
+        let chars_per_token = ms.chars_per_token;
+        let tokens = (f64::from(tokens_from(est.chars, est.messages, chars_per_token)) * p.safety)
             .ceil() as u32;
         let (out_reserve, max_tokens_override) = p.output_plan(est.requested_out);
         let reserve_tokens = tokens.saturating_add(out_reserve);
@@ -1108,6 +1110,7 @@ impl Scheduler {
             upstream_model: upstream,
             input_chars: est.chars,
             est_tokens: tokens,
+            chars_per_token,
             reserve_tokens,
             max_tokens_override,
         })

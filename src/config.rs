@@ -339,6 +339,18 @@ pub struct Quirks {
     /// codificação. Cohere degenera com UTF-8 cru (F0-19).
     #[serde(default, skip_serializing_if = "is_false")]
     pub ascii_json: bool,
+    /// Provider sem visão: cada `image_url` vira um aviso em texto (ADR 0006).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub strip_images: bool,
+    /// Provider exige assinatura de raciocínio em `tool_calls` (Gemini 3+, via
+    /// `extra_content.google.thought_signature`). Ligado: mantém a assinatura e
+    /// põe o valor neutro da doc em chamada sem assinatura vinda de outro modelo.
+    /// Desligado: `extra_content` não vai ao upstream (ADR 0006).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub thought_signatures: bool,
+    /// Formato exigido em `tool_calls[].id` e `tool_call_id` do histórico.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<ToolCallIdQuirk>,
 }
 
 /// Nome do header com o saldo **restante** de cada bucket.
@@ -376,6 +388,14 @@ impl Quirks {
 pub enum ToolChoiceQuirk {
     /// Provider só aceita `tool_choice: "auto"`; outros valores são reescritos.
     AutoOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallIdQuirk {
+    /// Exatamente 9 letras ou dígitos (Mistral). `id` que já cumpre passa igual; o
+    /// resto vira um hash determinístico, igual em `tool_calls` e na mensagem `tool`.
+    Alnum9,
 }
 
 /// Segundos de cooldown por tipo de erro.

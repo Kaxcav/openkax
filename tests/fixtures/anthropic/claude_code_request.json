@@ -1,0 +1,68 @@
+{
+  "model": "kax/summarizer",
+  "max_tokens": 32000,
+  "stream": true,
+  "temperature": 1,
+  "metadata": { "user_id": "user_abc_session_def" },
+  "thinking": { "type": "enabled", "budget_tokens": 4000 },
+  "context_management": { "edits": [{ "type": "clear_thinking_20251015", "keep": "all" }] },
+  "system": [
+    { "type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude.", "cache_control": { "type": "ephemeral" } },
+    { "type": "text", "text": "You are an interactive agent that helps users with software engineering tasks. Use the tools below.", "cache_control": { "type": "ephemeral", "ttl": "1h" } }
+  ],
+  "tools": [
+    {
+      "name": "Read",
+      "description": "Reads a file from the local filesystem.",
+      "input_schema": {
+        "type": "object",
+        "properties": { "file_path": { "type": "string" }, "limit": { "type": "number" } },
+        "required": ["file_path"],
+        "additionalProperties": false,
+        "$schema": "http://json-schema.org/draft-07/schema#"
+      }
+    },
+    {
+      "name": "Grep",
+      "description": "A powerful search tool built on ripgrep.",
+      "input_schema": {
+        "type": "object",
+        "properties": { "pattern": { "type": "string" }, "path": { "type": "string" } },
+        "required": ["pattern"]
+      },
+      "cache_control": { "type": "ephemeral" }
+    },
+    { "type": "web_search_20250305", "name": "web_search", "max_uses": 5 }
+  ],
+  "tool_choice": { "type": "auto" },
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "<system-reminder>\nContexto do repositório.\n</system-reminder>" },
+        { "type": "text", "text": "Onde o scheduler reserva cota?", "cache_control": { "type": "ephemeral" } }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        { "type": "thinking", "thinking": "Vou procurar reserve.", "signature": "c2ln" },
+        { "type": "text", "text": "Vou procurar." },
+        { "type": "tool_use", "id": "toolu_01A", "name": "Grep", "input": { "pattern": "fn reserve" } },
+        { "type": "tool_use", "id": "toolu_01B", "name": "Read", "input": { "file_path": "src/scheduler/mod.rs", "limit": 40 } }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        { "type": "tool_result", "tool_use_id": "toolu_01A", "content": "src/scheduler/mod.rs:1118:    pub fn reserve" },
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01B",
+          "content": [{ "type": "text", "text": "pub fn reserve(&self) {}", "cache_control": { "type": "ephemeral" } }]
+        },
+        { "type": "text", "text": "Resuma em uma frase." }
+      ]
+    }
+  ]
+}

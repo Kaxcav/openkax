@@ -158,8 +158,9 @@
       "id": "F1-1",
       "title": "CONTRACT: tipos serde do Anthropic Messages, assinaturas translate::anthropic, testes vermelhos, ADR 0006",
       "owner": "lead",
-      "status": "in_progress",
-      "depends": []
+      "status": "done",
+      "depends": [],
+      "note": "Tipos, stubs, ADR 0006 (proposta) e aceite: 65 testes com #[ignore = \"F1-…\"], 64 vermelhos com `cargo test -- --ignored` (tool_choice_without_usable_tools passa com o stub; o caso positivo está em tool_choice_table). Quirks novos só declarados (strip_images, thought_signatures, tool_call_id); Candidate.chars_per_token já vale."
     },
     {
       "id": "F1-2",
@@ -168,7 +169,8 @@
       "status": "todo",
       "depends": [
         "F1-1"
-      ]
+      ],
+      "note": "Inclui aplicar em build_upstream_body os quirks strip_images, thought_signatures e tool_call_id, e ligar thought_signatures no gemini e tool_call_id = \"alnum9\" no mistral (sem mudar rota, limite ou modelo). Fixture remontada do formato público, não capturada: a captura real vai no roteiro da F1-8 (ADR 0006)."
     },
     {
       "id": "F1-3",
@@ -177,7 +179,8 @@
       "status": "todo",
       "depends": [
         "F1-1"
-      ]
+      ],
+      "note": "Inclui encode_tool_use_id (assinatura no id, em hex) e finish_reason \"error\" como evento error."
     },
     {
       "id": "F1-4",
@@ -196,7 +199,8 @@
       "status": "todo",
       "depends": [
         "F1-1"
-      ]
+      ],
+      "note": "Precisa de um acessor no scheduler para o chars_per_token do 1º degrau da classe, sem passar por pick: não depende de cota nem de limite de pacote."
     },
     {
       "id": "F1-6",
@@ -205,7 +209,8 @@
       "status": "todo",
       "depends": [
         "F1-1"
-      ]
+      ],
+      "note": "Campo opcional `status` em RequestRecord. Não-2xx não pode sair como outcome ok; se usar variante nova de Outcome, avisar no LOG, porque o report da fábrica (F5-2) lê o ledger."
     },
     {
       "id": "F1-7",
@@ -226,7 +231,8 @@
         "F1-5",
         "F1-6",
         "F1-7"
-      ]
+      ],
+      "note": "Roteiro manual inclui: rodada dupla real com Gemini (assinatura), $schema/additionalProperties nas tools do Claude Code, captura de request real para a fixture."
     },
     {
       "id": "F2-1",

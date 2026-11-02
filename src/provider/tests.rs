@@ -527,3 +527,134 @@ fn ratelimit_headers_for_debug_only_expose_limit_names() {
         ]
     );
 }
+
+// ---------------------------------------------------- quirks da ponte (F1-2, ADR 0006)
+
+fn provider_with(quirks: &str) -> crate::config::Provider {
+    let toml = format!(
+        r#"
+        [[provider]]
+        id = "p"
+        base_url = "http://x"
+        auth = {{ kind = "none" }}
+        quirks = {{ {quirks} }}
+        models = [{{ id = "m", upstream = "m" }}]
+
+        [[class]]
+        id = "kax/x"
+        max_packet_tokens = 1000
+        route = [{{ provider = "p", model = "m" }}]
+        "#
+    );
+    Config::from_toml_str(&toml).unwrap().providers.remove(0)
+}
+
+fn upstream_messages(quirks: &str, messages: Value) -> Value {
+    let req = serde_json::from_value(json!({ "model": "kax/x", "messages": messages })).unwrap();
+    build_upstream_body(&provider_with(quirks), &req, "m", None)["messages"].clone()
+}
+
+fn call(id: &str, extra: Value) -> Value {
+    let mut c =
+        json!({ "id": id, "type": "function", "function": { "name": "f", "arguments": "{}" } });
+    if !extra.is_null() {
+        c["extra_content"] = extra;
+    }
+    c
+}
+
+fn signature(sig: &str) -> Value {
+    json!({ "google": { "thought_signature": sig } })
+}
+
+#[test]
+#[ignore = "F1-2"]
+fn strip_images_swaps_each_image_for_a_notice() {
+    let image =
+        json!({ "type": "image_url", "image_url": { "url": "data:image/png;base64,QQ==" } });
+    let text = json!({ "type": "text", "text": "veja" });
+    let msgs = json!([
+        { "role": "user", "content": [text, image] },
+        { "role": "user", "content": [image] },
+    ]);
+    let notice = json!({ "type": "text", "text": "[image omitted: provider has no vision]" });
+    assert_eq!(
+        upstream_messages("strip_images = true", msgs.clone()),
+        json!([
+            { "role": "user", "content": [text, notice] },
+            { "role": "user", "content": [notice] },
+        ])
+    );
+    assert_eq!(
+        upstream_messages("", msgs.clone()),
+        msgs,
+        "sem o quirk, igual"
+    );
+}
+
+/// Provider sem o quirk não recebe `extra_content`: há quem recuse campo extra.
+#[test]
+#[ignore = "F1-2"]
+fn extra_content_only_reaches_providers_with_thought_signatures() {
+    let msgs = json!([{ "role": "assistant", "content": null, "tool_calls": [call("c1", signature("S"))] }]);
+    assert_eq!(
+        upstream_messages("", msgs.clone()),
+        json!([{ "role": "assistant", "content": null, "tool_calls": [call("c1", Value::Null)] }])
+    );
+    assert_eq!(
+        upstream_messages("thought_signatures = true", msgs.clone()),
+        msgs
+    );
+}
+
+/// Histórico de outro modelo (fallback no meio da sessão) não tem assinatura: a
+/// 1ª chamada de cada mensagem recebe o valor neutro que a doc do Gemini aceita;
+/// as paralelas seguintes ficam sem.
+#[test]
+#[ignore = "F1-2"]
+fn missing_signature_gets_the_documented_neutral_value() {
+    let got = upstream_messages(
+        "thought_signatures = true",
+        json!([{ "role": "assistant", "content": null, "tool_calls": [call("c1", Value::Null), call("c2", Value::Null)] }]),
+    );
+    assert_eq!(
+        got[0]["tool_calls"],
+        json!([
+            call("c1", signature("skip_thought_signature_validator")),
+            call("c2", Value::Null)
+        ])
+    );
+}
+
+#[test]
+#[ignore = "F1-2"]
+fn alnum9_rewrites_tool_call_ids_consistently() {
+    let got = upstream_messages(
+        r#"tool_call_id = "alnum9""#,
+        json!([
+            { "role": "assistant", "content": null, "tool_calls": [call("toolu_01A", Value::Null), call("abc123XYZ", Value::Null), call("toolu_01B", Value::Null)] },
+            { "role": "tool", "tool_call_id": "toolu_01A", "content": "1" },
+            { "role": "tool", "tool_call_id": "abc123XYZ", "content": "2" },
+            { "role": "tool", "tool_call_id": "toolu_01B", "content": "3" },
+        ]),
+    );
+    let ids: Vec<&str> = (0..3)
+        .map(|i| got[0]["tool_calls"][i]["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids[1], "abc123XYZ", "id que já cumpre passa igual");
+    for id in &ids {
+        assert_eq!(id.len(), 9, "{id}");
+        assert!(id.chars().all(|c| c.is_ascii_alphanumeric()), "{id}");
+    }
+    assert_ne!(ids[0], ids[2]);
+    for i in 0..3 {
+        assert_eq!(got[i + 1]["tool_call_id"], ids[i], "mensagem tool {i}");
+    }
+}
+
+/// O default não altera nada que a Fase 0 já mandava.
+#[test]
+fn bridge_quirks_default_off() {
+    let q = provider_with("").quirks;
+    assert!(!q.strip_images && !q.thought_signatures && q.tool_call_id.is_none());
+}
