@@ -160,6 +160,13 @@
       "owner": "lead",
       "status": "done",
       "note": "110 unitários (+9 de worktree com repo tempfile) + 3 mcp_contract; clippy limpo. clean sem --all remove só worktrees sem alterações e sem commits novos (interpretação de 'abandonado'); com --all remove todos os kax/*"
+    },
+    {
+      "id": "F2-3",
+      "title": "Pacote enxuto: src/mcp/packet.rs (build_request, parse_response, recusa por max_packet_tokens)",
+      "owner": "lead",
+      "status": "done",
+      "note": "120 unitários (+10 de packet) + 3 mcp_contract (+3 #[ignore] F2-3/F2-4/F2-5 seguem de propósito: execução ponta a ponta depende do runner). System prompt PT-BR v1 (ADR 0007)"
     }
   ]
 }

@@ -5,6 +5,7 @@
 //! devolvem erro estruturado `not_implemented`; `quota` já devolve o snapshot
 //! real do scheduler. A execução (worktree, operário, verify) entra em F2-2+.
 
+mod packet;
 mod types;
 
 use rmcp::{
@@ -16,6 +17,7 @@ use serde_json::json;
 
 use crate::server::AppState;
 
+pub use packet::*;
 pub use types::*;
 
 /// Etapa em que os handlers estão (vira o campo `stage` dos erros).
