@@ -964,6 +964,22 @@ impl Scheduler {
     }
 
     /// Filtra e ordena os degraus elegíveis de `class_id`. Não debita nada.
+    /// Chars/token do 1º candidato configurado de `class_id` (F1-5).
+    /// Retorna `None` se a classe não existe.
+    pub fn class_chars_per_token(&self, class_id: &str) -> Option<f64> {
+        let sh = &*self.shared;
+        let class = sh.classes.iter().find(|c| c.id == class_id)?;
+        for step in &class.steps {
+            if let Some((pi, mi)) = *step {
+                let p = &sh.providers[pi];
+                let m = &p.models[mi];
+                let ms = lock(&m.scope);
+                return Some(ms.chars_per_token);
+            }
+        }
+        Some(sh.default_cpt)
+    }
+
     pub fn pick(&self, class_id: &str, request: &ChatCompletionRequest) -> Result<Pick, PickError> {
         self.pick_with(class_id, request, &PickOptions::default())
     }

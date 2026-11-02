@@ -322,6 +322,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/messages",
             post(anthropic::messages).layer(DefaultBodyLimit::max(MESSAGES_BODY_LIMIT)),
         )
+        .route(
+            "/v1/messages/count_tokens",
+            post(anthropic::count_tokens).layer(DefaultBodyLimit::max(MESSAGES_BODY_LIMIT)),
+        )
         .route("/v1/models", get(models))
         .route("/quota", get(quota))
         .with_state(state)

@@ -1115,7 +1115,6 @@ async fn body_over_the_limit_is_413_in_anthropic_format() {
 
 /// Mesma estimativa do scheduler, com o `chars_per_token` do 1º candidato.
 #[tokio::test]
-#[ignore = "F1-5"]
 async fn count_tokens_uses_the_scheduler_estimate() {
     let (groq, gemini) = mocks().await;
     let gw = gateway(&groq, &gemini).await;
@@ -1146,7 +1145,6 @@ async fn count_tokens_uses_the_scheduler_estimate() {
 /// Estimar não depende de cota nem de caber: sem chave e acima do limite do
 /// pacote, a resposta é o número.
 #[tokio::test]
-#[ignore = "F1-5"]
 async fn count_tokens_ignores_quota_and_packet_limit() {
     let (groq, gemini) = mocks().await;
     let gw = Gateway::spawn(&two_provider_config(&groq.uri(), &gemini.uri()), &[]).await;
@@ -1171,7 +1169,6 @@ async fn count_tokens_ignores_quota_and_packet_limit() {
 }
 
 #[tokio::test]
-#[ignore = "F1-5"]
 async fn count_tokens_errors_in_anthropic_format() {
     let (groq, gemini) = mocks().await;
     let gw = gateway(&groq, &gemini).await;

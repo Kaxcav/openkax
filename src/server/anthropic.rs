@@ -54,6 +54,36 @@ pub(super) fn upstream_message(body: &str) -> String {
     message.unwrap_or(body).to_owned()
 }
 
+pub(super) async fn count_tokens(
+    State(app): State<AppState>,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let body = match body {
+        Ok(b) => b,
+        Err(e) => return error_response(e.status(), &e.body_text()),
+    };
+    let req: MessagesRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return error_response(StatusCode::BAD_REQUEST, &format!("corpo inválido: {e}"));
+        }
+    };
+    let st = app.view();
+    let Some(cpt) = st.scheduler().class_chars_per_token(&req.model) else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            &format!("classe desconhecida: {}", req.model),
+        );
+    };
+    let translated = to_openai_request(&req);
+    let count = estimate_tokens(&translated, cpt);
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "input_tokens": count })),
+    )
+        .into_response()
+}
+
 pub(super) async fn messages(
     State(app): State<AppState>,
     headers: HeaderMap,
