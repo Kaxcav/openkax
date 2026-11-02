@@ -119,6 +119,7 @@ struct Live {
     secrets: Secrets,
     scheduler: Scheduler,
     client: ProviderClient,
+    passthrough_client: reqwest::Client,
 }
 
 impl Live {
@@ -129,6 +130,7 @@ impl Live {
     ) -> Result<Self, StartupError> {
         let http =
             provider::build_http_client(Duration::from_millis(config.defaults.request_timeout_ms))?;
+        let passthrough_client = provider::build_passthrough_client()?;
         let scheduler = Scheduler::new(&config, clock, &|env| secrets.get(env).is_some());
         let lookup = |k: &str| secrets.get(k).map(str::to_owned);
         let resolved = config
@@ -142,6 +144,7 @@ impl Live {
             secrets,
             scheduler,
             client: ProviderClient::new(http),
+            passthrough_client,
         })
     }
 }
@@ -167,8 +170,8 @@ impl View {
         &self.hub.ledger
     }
 
-    fn http_client(&self) -> &reqwest::Client {
-        self.live.client.http()
+    fn passthrough_client(&self) -> &reqwest::Client {
+        &self.live.passthrough_client
     }
 
     fn api_key(&self, provider_idx: usize) -> Option<&str> {

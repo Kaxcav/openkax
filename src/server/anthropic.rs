@@ -102,7 +102,7 @@ async fn passthrough(
         _ => format!("{base}{path}"),
     };
 
-    let client = st.http_client();
+    let client = st.passthrough_client();
     let mut req_builder = client.post(&url);
 
     for (name, value) in &headers {

@@ -202,6 +202,52 @@ async fn live_upstream(
     format!("http://{addr}")
 }
 
+/// Upstream TCP cru que entrega chunks ao longo do tempo.
+async fn delayed_live_upstream(
+    chunks: Vec<(&'static str, Duration)>,
+    content_type: &'static str,
+) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = sock.read(&mut buf).await.unwrap();
+            seen.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&seen);
+            if let Some(end) = text.find("\r\n\r\n") {
+                let len = text[..end]
+                    .lines()
+                    .find_map(|l| {
+                        let l = l.to_ascii_lowercase();
+                        l.strip_prefix("content-length: ")
+                            .map(|v| v.parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                if seen.len() >= end + 4 + len {
+                    break;
+                }
+            }
+        }
+        let head = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\nconnection: close\r\ntransfer-encoding: chunked\r\n\r\n"
+        );
+        sock.write_all(head.as_bytes()).await.unwrap();
+        let chunk = |s: &str| format!("{:x}\r\n{s}\r\n", s.len());
+        for (data, delay) in chunks {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            sock.write_all(chunk(data).as_bytes()).await.unwrap();
+            sock.flush().await.unwrap();
+        }
+        sock.write_all(b"0\r\n\r\n").await.unwrap();
+    });
+    format!("http://{addr}")
+}
+
 /// Lê até `needle` aparecer, confirma ao upstream e lê o resto. Se o gateway
 /// segurar o corpo, o `timeout` estoura: o upstream só termina depois da confirmação.
 async fn read_live(
@@ -1356,6 +1402,48 @@ async fn passthrough_stream_is_delivered_live() {
     assert_eq!(
         text,
         "event: a\ndata: {\"x\": 1}\n\nevent: b\ndata: {\"y\": 2}\n\n"
+    );
+}
+
+/// Passthrough não usa timeout total: stream de ~2,5 s passa mesmo com request_timeout_ms = 1000.
+#[tokio::test]
+async fn passthrough_stream_does_not_timeout_on_long_stream() {
+    let chunks = vec![
+        ("event: a\ndata: {\"x\": 1}\n\n", Duration::from_millis(0)),
+        ("event: b\ndata: {\"y\": 2}\n\n", Duration::from_millis(800)),
+        ("event: c\ndata: {\"z\": 3}\n\n", Duration::from_millis(900)),
+        ("event: d\ndata: {\"w\": 4}\n\n", Duration::from_millis(900)),
+    ];
+    let up = delayed_live_upstream(chunks, "text/event-stream").await;
+    let cfg = format!(
+        r#"
+        [defaults]
+        request_timeout_ms = 1000
+        first_token_timeout_ms = 500
+        estimate_chars_per_token = 3.6
+
+        [[provider]]
+        id = "anthropic"
+        base_url = "{up}"
+        auth = {{ kind = "passthrough" }}
+        native = "anthropic"
+        "#
+    );
+    let gw = Gateway::spawn(&cfg, SECRETS).await;
+
+    let mut req = gw
+        .http
+        .post(format!("{}/v1/messages", gw.base))
+        .body(ODD_BODY);
+    for (k, v) in CLIENT_HEADERS {
+        req = req.header(*k, *v);
+    }
+    let resp = req.send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert_eq!(
+        text,
+        "event: a\ndata: {\"x\": 1}\n\nevent: b\ndata: {\"y\": 2}\n\nevent: c\ndata: {\"z\": 3}\n\nevent: d\ndata: {\"w\": 4}\n\n"
     );
 }
 

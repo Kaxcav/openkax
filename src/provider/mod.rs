@@ -864,6 +864,16 @@ pub fn install_crypto_provider() {
 /// `reqwest::Client` com rustls+ring (instala o crypto provider antes).
 /// Pool enxuto (ADR 0002): conexão ociosa fecha em 30 s e no máximo 2 por host,
 /// para a memória privada voltar ao patamar ocioso depois de uma rajada.
+pub fn build_passthrough_client() -> reqwest::Result<reqwest::Client> {
+    install_crypto_provider();
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .read_timeout(Duration::from_secs(300))
+        .pool_idle_timeout(Duration::from_secs(30))
+        .pool_max_idle_per_host(2)
+        .build()
+}
+
 pub fn build_http_client(timeout: Duration) -> reqwest::Result<reqwest::Client> {
     install_crypto_provider();
     reqwest::Client::builder()
