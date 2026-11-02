@@ -9,9 +9,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Teto de operários simultâneos aceito em `delegate_batch`.
-pub const MAX_PARALLELISM: u32 = 32;
+pub const MAX_PARALLELISM: u32 = 16;
 /// Paralelismo quando o lead não informa.
-pub const DEFAULT_PARALLELISM: u32 = 8;
+pub const DEFAULT_PARALLELISM: u32 = 4;
 /// Tentativas quando o lead não informa (1ª + retry no próximo candidato).
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 2;
 /// Teto de tentativas por tarefa.
@@ -134,7 +134,36 @@ pub enum BatchState {
     Done,
 }
 
-/// Resposta de `status(batch_id)`.
+/// Estado de uma tarefa dentro do lote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskState {
+    Queued,
+    Running,
+    Accepted,
+    Rejected,
+    NeedsLead,
+}
+
+impl From<TaskStatus> for TaskState {
+    fn from(s: TaskStatus) -> Self {
+        match s {
+            TaskStatus::Accepted => Self::Accepted,
+            TaskStatus::Rejected => Self::Rejected,
+            TaskStatus::NeedsLead => Self::NeedsLead,
+        }
+    }
+}
+
+/// Uma tarefa do lote: estado e, quando pronta, o resultado.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TaskEntry {
+    pub id: String,
+    pub state: TaskState,
+    pub result: Option<TaskResult>,
+}
+
+/// Resposta de `delegate_batch` (tudo em `queued`) e de `status(batch_id)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct BatchStatus {
     pub batch_id: String,
@@ -142,6 +171,11 @@ pub struct BatchStatus {
     pub total: u32,
     /// Tarefas já concluídas (qualquer status).
     pub finished: u32,
+    /// Maior número de tarefas rodando ao mesmo tempo até agora.
+    pub peak_running: u32,
+    /// Todas as tarefas, na ordem de envio, com o estado atual.
+    pub tasks: Vec<TaskEntry>,
+    /// Resultados já prontos.
     pub results: Vec<TaskResult>,
 }
 
@@ -161,7 +195,7 @@ pub struct DelegateBatchParams {
     pub repo: String,
     pub base_ref: String,
     pub tasks: Vec<TaskPacket>,
-    /// Operários simultâneos (1..=32, padrão 8).
+    /// Operários simultâneos (1..=16, padrão 4).
     #[serde(default = "default_parallelism")]
     pub parallelism: u32,
 }

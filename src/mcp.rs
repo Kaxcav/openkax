@@ -1,11 +1,14 @@
 //! Servidor MCP `kax-workers` (`openkax mcp`, stdio) — **Fase 2**.
 //!
 //! Tools (PLANO_MESTRE §3.6): `delegate`, `delegate_batch`, `status`, `quota`,
-//! `report`. `delegate` executa a tarefa de ponta a ponta (F2-5, ver `run`);
-//! `quota` devolve o snapshot do scheduler; as demais validam a entrada e
-//! devolvem `not_implemented` até a etapa que as liga.
+//! `report`. `delegate` executa uma tarefa de ponta a ponta (F2-5, ver `run`);
+//! `delegate_batch` despacha um lote em background e `status` o consulta
+//! (F2-6, ver `batch`); `report` agrega o ledger; `quota` devolve o snapshot
+//! do scheduler.
 
+mod batch;
 mod packet;
+mod report;
 mod run;
 mod types;
 
@@ -14,29 +17,24 @@ use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     tool, tool_handler, tool_router,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
 use crate::server::AppState;
 
+pub use batch::Batches;
 pub use packet::*;
+pub use report::{Report, Tally};
 pub use run::run_task;
 pub use types::*;
 
 /// Etapa em que os handlers estão (vira o campo `stage` dos erros).
-const STAGE: &str = "F2-1";
+const STAGE: &str = "F2-6";
 
 /// Corpo JSON de erro estruturado devolvido pelas tools (`is_error = true`).
 pub fn tool_error(code: &str, message: &str) -> String {
     json!({ "error": { "code": code, "stage": STAGE, "message": message } }).to_string()
-}
-
-fn not_implemented(tool: &str) -> String {
-    tool_error(
-        "not_implemented",
-        &format!("{tool}: não implementado na etapa {STAGE}"),
-    )
 }
 
 fn invalid(message: String) -> String {
@@ -47,6 +45,9 @@ fn invalid(message: String) -> String {
 #[derive(Clone)]
 pub struct KaxWorkers {
     app: AppState,
+    batches: Batches,
+    /// Diretório do ledger lido pelo `report` (`None` → relatório vazio).
+    ledger_dir: Option<PathBuf>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -54,8 +55,16 @@ impl KaxWorkers {
     pub fn new(app: AppState) -> Self {
         Self {
             app,
+            batches: Batches::default(),
+            ledger_dir: None,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Diretório do ledger que o `report` lê.
+    pub fn with_ledger_dir(mut self, dir: PathBuf) -> Self {
+        self.ledger_dir = Some(dir);
+        self
     }
 
     /// Atende MCP em stdin/stdout até o cliente fechar.
@@ -85,13 +94,23 @@ impl KaxWorkers {
         Parameters(p): Parameters<DelegateBatchParams>,
     ) -> Result<String, String> {
         p.validate().map_err(invalid)?;
-        Err(not_implemented("delegate_batch"))
+        let queued = self.batches.start(
+            &self.app,
+            Path::new(&p.repo),
+            &p.base_ref,
+            p.tasks,
+            p.parallelism,
+        );
+        serde_json::to_string(&queued).map_err(|e| tool_error("internal", &e.to_string()))
     }
 
     #[tool(description = "Estado e resultados de um lote já despachado.")]
     async fn status(&self, Parameters(p): Parameters<StatusParams>) -> Result<String, String> {
         p.validate().map_err(invalid)?;
-        Err(not_implemented("status"))
+        let status = self.batches.status(&p.batch_id).ok_or_else(|| {
+            tool_error("not_found", &format!("lote desconhecido: {}", p.batch_id))
+        })?;
+        serde_json::to_string(&status).map_err(|e| tool_error("internal", &e.to_string()))
     }
 
     #[tool(description = "Saldo de quota por provider (snapshot do scheduler).")]
@@ -101,10 +120,17 @@ impl KaxWorkers {
     }
 
     #[tool(
-        description = "Relatório do ledger: aceitação por classe/provider, latência e tokens no período."
+        description = "Relatório do ledger: aceitação por classe e por provider no período (day|week|month)."
     )]
-    async fn report(&self, Parameters(_p): Parameters<ReportParams>) -> Result<String, String> {
-        Err(not_implemented("report"))
+    async fn report(&self, Parameters(p): Parameters<ReportParams>) -> Result<String, String> {
+        let dir = self.ledger_dir.clone().unwrap_or_default();
+        let period = p.period;
+        let report = tokio::task::spawn_blocking(move || {
+            report::build(&dir, period, std::time::SystemTime::now())
+        })
+        .await
+        .map_err(|e| tool_error("internal", &e.to_string()))?;
+        serde_json::to_string(&report).map_err(|e| tool_error("internal", &e.to_string()))
     }
 }
 

@@ -1,5 +1,5 @@
 {
-  "phase": 0,
+  "phase": 2,
   "updated": "2026-11-02",
   "tasks": [
     {
@@ -273,13 +273,10 @@
     },
     {
       "id": "F2-6",
-      "title": "delegate_batch com parallelism, status, quota, ledger kind:task, memória em rajada de 8",
-      "owner": "fabrica",
-      "status": "todo",
-      "depends": [
-        "F2-5"
-      ],
-      "note": "Frente da fábrica, na branch Kaxcav/openkax-fase-2 (docs/noturno/FABRICA.md nessa branch). Não é do turno na nuvem."
+      "title": "delegate_batch (semáforo, background), status(batch_id), report(period); medição de memória do lote de 8",
+      "owner": "lead",
+      "status": "done",
+      "note": "130 unitários (+2 de report) + 6 mcp_contract (+1 #[ignore] de medição) + 1 mcp_batch (8 tarefas wiremock, parallelism=4, pico<=4 e 8 resultados) + 4 mcp_retry. Padrão de parallelism 4, máximo 16 (era 8/32). Aceite recusado = needs_lead (rejected não é produzido). Memória privada do lote: 1,67 → 2,30 → 2,18 MiB (ADR 0002). Registro de lotes só em memória"
     },
     {
       "id": "F2-7",
