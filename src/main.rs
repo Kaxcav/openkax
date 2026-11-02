@@ -35,9 +35,50 @@ fn main() -> ExitCode {
     match sub.as_deref() {
         None | Some("serve") => run_serve(),
         Some("mcp") => run_mcp(),
+        Some("clean") => run_clean(),
         Some(other) => {
-            eprintln!("subcomando desconhecido: {other}\nuso: openkax [serve|mcp]");
+            eprintln!("subcomando desconhecido: {other}\nuso: openkax [serve|mcp|clean]");
             ExitCode::from(2)
+        }
+    }
+}
+
+/// `openkax clean [--repo <path>] [--all]`: remove worktrees de tarefas
+/// abandonadas (`--all`: todos). Só toca branches `kax/*`.
+fn run_clean() -> ExitCode {
+    let mut repo = PathBuf::from(".");
+    let mut all = false;
+    let mut args = std::env::args().skip(2);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--all" => all = true,
+            "--repo" => match args.next() {
+                Some(p) => repo = PathBuf::from(p),
+                None => {
+                    eprintln!("--repo exige um caminho");
+                    return ExitCode::from(2);
+                }
+            },
+            other => {
+                eprintln!(
+                    "argumento desconhecido: {other}
+uso: openkax clean [--repo <path>] [--all]"
+                );
+                return ExitCode::from(2);
+            }
+        }
+    }
+    match openkax::worktree::clean(&repo, all) {
+        Ok(removed) => {
+            println!("{} worktree(s) removido(s)", removed.len());
+            for id in removed {
+                println!("  kax/{id}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
         }
     }
 }

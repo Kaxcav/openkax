@@ -245,13 +245,10 @@
     },
     {
       "id": "F2-2",
-      "title": "Worktree por tarefa, openkax clean, isolamento",
-      "owner": "fabrica",
-      "status": "todo",
-      "depends": [
-        "F2-1"
-      ],
-      "note": "Frente da fábrica, na branch Kaxcav/openkax-fase-2 (docs/noturno/FABRICA.md nessa branch). Não é do turno na nuvem."
+      "title": "Worktree por tarefa: src/worktree.rs (create/list/remove/clean) + openkax clean [--repo] [--all]",
+      "owner": "lead",
+      "status": "done",
+      "note": "110 unitários (+9 de worktree com repo tempfile) + 3 mcp_contract; clippy limpo. clean sem --all remove só worktrees sem alterações e sem commits novos (interpretação de 'abandonado'); com --all remove todos os kax/*"
     },
     {
       "id": "F2-3",
