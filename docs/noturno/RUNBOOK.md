@@ -33,7 +33,7 @@ No início, depois do portão, leia a última entrada de `docs/noturno/LOG.md` n
 ## Ciclo por execução
 1. Portão → trava.
 2. Ler `PLANO_MESTRE.md` (§3.5 para a Fase 1, §3.6 para a Fase 2, §3.7 para o report, §4), `CLAUDE.md`, ADRs relevantes e `tasks.json`.
-3. Escolher a primeira tarefa do backlog, na ordem F0-24 → F1-* → F2-* → F5-*, com status `todo` cujas dependências estão `done`.
+3. Escolher a primeira tarefa do backlog, na ordem F0-24 → F1-* → F2-*, com status `todo` cujas dependências estão `done`.
 4. TDD: testes primeiro (devem falhar), implementação, `cargo test`, `cargo clippy -D warnings`.
 5. **Revisão independente:** suba um subagente sem contexto desta conversa, entregue o diff (`git diff origin/fase-1...HEAD`) e o trecho do PLANO/ADR que ele deve honrar, e peça defeitos concretos. Corrija o que for confirmado; registre no LOG o que foi descartado e por quê.
 6. Commit(s) `tipo(escopo): resumo`, push na branch de trabalho.
@@ -44,7 +44,7 @@ No início, depois do portão, leia a última entrada de `docs/noturno/LOG.md` n
 ## Parada
 - CI vermelho: a próxima execução só corrige o CI. **Duas execuções seguidas sem conseguir deixar o CI verde → BLOQUEADO**, não comece tarefa nova; registre causa e hipótese.
 - Ambiguidade de spec que muda contrato público → `needs_user`, pule para a próxima tarefa independente; se não houver, encerre.
-- **Decisão do Kaxcav (2026-11-02 15:11): o turno roda sem aceite humano intermediário.** Ordem do backlog: F0-24 → F1-1..F1-8 → F2-1..F2-7 → F5-1..F5-2. Ao terminar a Fase 1 (F1-8 feito, CI verde), siga direto para a Fase 2 numa branch `fase-2` criada a partir da `fase-1` (empilhada; PR draft `fase-2 → fase-1`). Aceites manuais (clientes reais, providers reais) ficam documentados em `docs/smoke/` para depois — nunca são pré-requisito do turno.
+- **Decisão do Kaxcav (2026-11-02 15:11): o turno roda sem aceite humano intermediário.** Ordem do backlog: F0-24 → F1-1..F1-8 → F2-1..F2-7 (F5-1/F5-2 são do Gemini, ver abaixo). Ao terminar a Fase 1 (F1-8 feito, CI verde), siga direto para a Fase 2 numa branch `fase-2` criada a partir da `fase-1` (empilhada; PR draft `fase-2 → fase-1`). Aceites manuais (clientes reais, providers reais) ficam documentados em `docs/smoke/` para depois — nunca são pré-requisito do turno.
 - Tudo feito e CI verde → registre "backlog do turno concluído" no LOG e encerre as execuções seguintes sem trabalhar.
 
 ## Fechamento da Fase 0 (primeira tarefa após o portão)
@@ -54,7 +54,7 @@ No início, depois do portão, leia a última entrada de `docs/noturno/LOG.md` n
 | F0-24 compat de clientes | Substitui o aceite manual Continue/Cline como critério bloqueante (decisão do Kaxcav 2026-11-02; o manual vira opcional). Testes de integração (wiremock) que reproduzem os formatos de request reais dos clientes, montados a partir do código-fonte público deles: **Continue** (chat stream, `stream_options`, mensagens com `system` + histórico, edit/apply) e **Cline** (OpenAI Compatible: system prompt grande > 6k tokens com `tools`/`tool_choice`, várias rodadas de `tool_calls` → mensagens `tool`, stream). Cada teste valida: classe certa, stream SSE bem formado e terminado em `[DONE]`, tool_calls com índices/argumentos reconstruídos, 413 para `kax/coder-fast` com o prompt do Cline, fallback pré-1º-token no meio de uma sessão multi-rodada, `/quota` e ledger coerentes. Registre a mudança de critério no ADR 0004 e no PLANO §4 Fase 0. Esta tarefa roda na branch `fase-1`. | suíte verde no CI (Linux e Windows) |
 
 ## Tarefas da Fase 1 (ponte Anthropic) — ver PLANO §3.5
-Registre F0-24, F1-*, F2-* e F5-* no `tasks.json` na primeira execução liberada (owner `lead`, status `todo`).
+Registre F0-24, F1-* e F2-* no `tasks.json` na primeira execução liberada (owner `lead`, status `todo`).
 
 | ID | Depende | Entrega | Aceite |
 |---|---|---|---|
@@ -80,7 +80,9 @@ Mesmas regras (CONTRACT primeiro, TDD, sem provider real: operários respondem v
 | F2-6 batch | F2-5 | `delegate_batch` com `parallelism` (semáforo), `status(batch_id)`, `quota()`; ledger `kind:"task"`; medir memória privada numa rajada de 8 tarefas paralelas (mocks) e registrar |
 | F2-7 docs | F2-6 | ADR 0007 Aceito; `docs/smoke/fase-2-aceite.md` (roteiro manual: Claude Code despacha 10 tarefas reais, ≥7 aceitas); exemplo de `.kax/verify.toml` |
 
-## Fase 5 parcial (testável sem provider real) — só depois da F2-7
+## Fase 5 parcial — **frente do Gemini (Antigravity, PC de casa), NÃO do turno na nuvem**
+Decisão de 2026-11-02 15:22: estas duas tarefas rodam em paralelo pelo agente Gemini do Antigravity, na branch `feat/doctor-report` (criada a partir da `fase-0`), porque tocam arquivos disjuntos (`src/doctor.rs`, `src/report.rs`). O turno na nuvem **não** as executa e **não** toca nessa branch. Ao terminar a F2-7, o turno encerra o backlog.
+Única área de contato: o despacho de subcomandos em `src/main.rs` (`mcp` na F2-1; `doctor`/`report` no Gemini) — conflito pequeno, resolvido no merge pela manhã.
 
 | ID | Entrega |
 |---|---|
