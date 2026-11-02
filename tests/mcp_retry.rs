@@ -167,6 +167,45 @@ async fn max_attempts_one_does_not_retry() {
     gemini.verify().await;
 }
 
+/// C2: o verify roda código do operário; o que ele deixar fora da lista `write`
+/// não vira commit. A tarefa vai para `needs_lead` e a branch fica no base.
+#[tokio::test]
+async fn verify_side_effect_outside_write_list_is_not_committed() {
+    let (groq, gemini) = (MockServer::start().await, MockServer::start().await);
+    mount(&groq, &diff_to("GOOD"), 1).await;
+    mount(&gemini, &diff_to("GOOD"), 0).await;
+    let repo = temp_repo();
+    let app = app(&groq, &gemini, tempfile::tempdir().unwrap().path());
+    let packet: TaskPacket = serde_json::from_value(json!({
+        "id": "T-5",
+        "class": "kax/coder-fast",
+        "objective": "Trocar OLD por GOOD",
+        "files": [{ "path": "value.txt", "mode": "write" }],
+        "accept": {
+            "verify": ["git grep -q GOOD -- value.txt", "echo x> evil.txt"],
+            "expect": "exit 0"
+        },
+        "max_attempts": 2
+    }))
+    .unwrap();
+
+    let r = run_task(&app, repo.path(), "main", &packet).await;
+
+    assert_eq!(r.status, TaskStatus::NeedsLead, "{r:?}");
+    assert_eq!(r.attempts, 1, "não adianta tentar outro provider");
+    assert!(
+        r.verify_log.contains("depois do verify"),
+        "{}",
+        r.verify_log
+    );
+    assert!(r.verify_log.contains("evil.txt"), "{}", r.verify_log);
+    groq.verify().await;
+    gemini.verify().await;
+    let ahead = git(repo.path(), &["rev-list", "--count", "main..kax/T-5"]);
+    assert_eq!(ahead.trim(), "0", "nada foi commitado");
+    assert!(!repo.path().join(".kax/wt/T-5/evil.txt").exists());
+}
+
 /// O stderr da tentativa que falhou vai anexado ao pacote da seguinte.
 #[tokio::test]
 async fn failed_attempt_log_is_appended_to_next_packet() {

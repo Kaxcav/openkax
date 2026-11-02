@@ -13,6 +13,7 @@ use serde_json::Value;
 
 use super::{
     TaskPacket, TaskResult, TaskStatus, TokenUsage, WorkerOutput, build_request, parse_response,
+    write_paths,
 };
 use crate::config::Config;
 use crate::ledger::{self, LedgerEntry, TaskRecord};
@@ -123,6 +124,19 @@ async fn attempt_loop(
             return TaskStatus::NeedsLead;
         }
     };
+    let scope = {
+        let path = wt.path.clone();
+        match blocking(move || worktree::head(&path)).await {
+            Ok(base) => Scope {
+                base,
+                allowed: write_paths(packet),
+            },
+            Err(e) => {
+                st.log = format!("worktree: {e}");
+                return TaskStatus::NeedsLead;
+            }
+        }
+    };
 
     let mut feedback: Option<String> = None;
     while st.attempts < packet.max_attempts {
@@ -133,8 +147,26 @@ async fn attempt_loop(
                 return TaskStatus::NeedsLead;
             }
         }
-        match one_attempt(app, &wt.path, packet, feedback.as_deref(), &opts, st).await {
+        let attempt = one_attempt(
+            app,
+            &wt.path,
+            packet,
+            feedback.as_deref(),
+            &opts,
+            &scope,
+            st,
+        );
+        match attempt.await {
             Ok(()) => {
+                // O verify rodou código do operário: o que vai virar commit passa
+                // de novo pela guarda (inclusive commits feitos durante o verify).
+                match stage_and_guard(&wt.path, &scope).await {
+                    Ok(diff) => st.diff = diff,
+                    Err(Failure::Retry(why) | Failure::Stop(why)) => {
+                        st.log = format!("depois do verify: {why}");
+                        return TaskStatus::NeedsLead;
+                    }
+                }
                 let msg = format!("kax({}): {}", packet.id, packet.objective.trim());
                 let path = wt.path.clone();
                 if let Err(e) = blocking(move || worktree::commit_all(&path, &msg)).await {
@@ -178,12 +210,45 @@ fn verify_options(repo: &Path) -> Result<RunOptions, String> {
     Ok(RunOptions::from_config(&cfg))
 }
 
+/// O que a tarefa pode alterar: paths `write` a partir do commit base.
+struct Scope {
+    base: String,
+    allowed: Vec<String>,
+}
+
+/// `git add -A` e a guarda C2 ([`verify::check_staged`]) contra o commit base.
+/// Fora do escopo → reset do worktree e `Retry` com o motivo; erro de git → `Stop`.
+async fn stage_and_guard(wt: &Path, scope: &Scope) -> Result<String, Failure> {
+    let path = wt.to_owned();
+    let diff = blocking(move || worktree::staged_diff(&path))
+        .await
+        .map_err(|e| Failure::Stop(format!("worktree: {e}")))?;
+    let (path, base, allowed) = (wt.to_owned(), scope.base.clone(), scope.allowed.clone());
+    let checked = blocking(move || {
+        Ok::<_, std::convert::Infallible>(verify::check_staged(&path, &base, &allowed))
+    })
+    .await;
+    match checked {
+        Ok(Ok(())) => Ok(diff),
+        Ok(Err(verify::RunError::OutOfScope(why))) => {
+            let path = wt.to_owned();
+            blocking(move || worktree::reset(&path))
+                .await
+                .map_err(|e| Failure::Stop(format!("{why}; reset do worktree falhou: {e}")))?;
+            Err(Failure::Retry(format!("alteração fora do escopo: {why}")))
+        }
+        Ok(Err(e)) => Err(Failure::Stop(e.to_string())),
+        Err(e) => Err(Failure::Stop(e)),
+    }
+}
+
 async fn one_attempt(
     app: &AppState,
     wt: &Path,
     packet: &TaskPacket,
     feedback: Option<&str>,
     opts: &RunOptions,
+    scope: &Scope,
     st: &mut Progress,
 ) -> Result<(), Failure> {
     let (max_packet, cpt) = app
@@ -219,16 +284,15 @@ async fn one_attempt(
                 .map_err(Failure::Retry)?;
         }
         WorkerOutput::Files(files) => {
+            // Paths já validados; falha aqui é do repo (symlink, disco), não do operário.
             let path = wt.to_owned();
             blocking(move || write_files(&path, &files))
                 .await
-                .map_err(Failure::Retry)?;
+                .map_err(Failure::Stop)?;
         }
     }
-    let path = wt.to_owned();
-    st.diff = blocking(move || worktree::staged_diff(&path))
-        .await
-        .unwrap_or_default();
+    // Guarda pós-apply: vale o que o git pôs no índice, não o que o parser leu.
+    st.diff = stage_and_guard(wt, scope).await?;
 
     let (path, cmds, expect, opts) = (
         wt.to_owned(),
@@ -293,13 +357,84 @@ async fn read_reply(response: axum::response::Response) -> Result<Reply, Failure
 }
 
 /// Grava os arquivos completos do operário (paths já validados pelo parser).
-fn write_files(root: &Path, files: &[(String, String)]) -> std::io::Result<()> {
+/// Recusa tudo, antes de gravar qualquer um, se o path ou um diretório pai
+/// dentro do worktree for symlink (link vindo do `base_ref`, C2).
+fn write_files(root: &Path, files: &[(String, String)]) -> Result<(), String> {
+    for (rel, _) in files {
+        let mut cur = root.to_path_buf();
+        for part in Path::new(rel).components() {
+            cur.push(part);
+            if std::fs::symlink_metadata(&cur).is_ok_and(|m| m.file_type().is_symlink()) {
+                let link = cur.strip_prefix(root).unwrap_or(&cur).display().to_string();
+                return Err(format!("{rel}: {link} é symlink; escrita recusada"));
+            }
+        }
+    }
     for (rel, content) in files {
         let full = root.join(rel);
         if let Some(dir) = full.parent() {
-            std::fs::create_dir_all(dir)?;
+            std::fs::create_dir_all(dir).map_err(|e| format!("{rel}: {e}"))?;
         }
-        std::fs::write(full, content)?;
+        std::fs::write(full, content).map_err(|e| format!("{rel}: {e}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn one(rel: &str) -> Vec<(String, String)> {
+        vec![(rel.to_owned(), "x\n".to_owned())]
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_files_refuses_symlinks() {
+        use std::os::unix::fs::symlink;
+        let wt = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        // Diretório pai é link para fora do worktree.
+        symlink(outside.path(), wt.path().join("src")).unwrap();
+        let e = write_files(wt.path(), &one("src/new.rs")).unwrap_err();
+        assert!(e.contains("symlink"), "{e}");
+        assert!(!outside.path().join("new.rs").exists());
+        // O próprio arquivo é link.
+        let target = outside.path().join("alvo");
+        std::fs::write(&target, "original").unwrap();
+        std::fs::create_dir(wt.path().join("lib")).unwrap();
+        symlink(&target, wt.path().join("lib/x.rs")).unwrap();
+        assert!(write_files(wt.path(), &one("lib/x.rs")).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+        // Sem link no caminho, grava.
+        write_files(wt.path(), &one("lib/y.rs")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(wt.path().join("lib/y.rs")).unwrap(),
+            "x\n"
+        );
+    }
+
+    /// No Windows, symlink exige admin ou Modo de Desenvolvedor; junction
+    /// (`mklink /J`) não, e o std a trata como symlink. Cobre o diretório pai;
+    /// o caso do próprio arquivo como link fica com o teste unix (CI Linux).
+    #[cfg(windows)]
+    #[test]
+    fn write_files_refuses_junction_parent() {
+        let wt = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let st = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(wt.path().join("src"))
+            .arg(outside.path())
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(st.success(), "mklink /J falhou");
+        let e = write_files(wt.path(), &one("src/new.rs")).unwrap_err();
+        assert!(e.contains("symlink"), "{e}");
+        assert!(!outside.path().join("new.rs").exists());
+        write_files(wt.path(), &one("lib/y.rs")).unwrap();
+    }
 }

@@ -225,6 +225,11 @@ pub fn reset(path: &Path) -> Result<(), WorktreeError> {
     Ok(())
 }
 
+/// Commit atual do worktree; logo após o [`create`], é o `base_ref` resolvido.
+pub fn head(path: &Path) -> Result<String, WorktreeError> {
+    Ok(git(path, &["rev-parse", "HEAD"])?.trim().to_owned())
+}
+
 /// Diff do que está no índice contra o HEAD do worktree (após `git add -A`).
 pub fn staged_diff(path: &Path) -> Result<String, WorktreeError> {
     git(path, &["add", "-A"])?;
