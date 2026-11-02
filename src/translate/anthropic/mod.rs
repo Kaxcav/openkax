@@ -375,10 +375,12 @@ fn decode_hex(hex: &str) -> Option<String> {
     }
     let bytes = hex
         .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let hi = char::from(pair[0]).to_digit(16)?;
-            let lo = char::from(pair[1]).to_digit(16)?;
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&[hi, lo]| {
+            let hi = char::from(hi).to_digit(16)?;
+            let lo = char::from(lo).to_digit(16)?;
             u8::try_from(hi * 16 + lo).ok()
         })
         .collect::<Option<Vec<u8>>>()?;
