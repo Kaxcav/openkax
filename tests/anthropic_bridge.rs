@@ -1495,7 +1495,6 @@ fn alias_config(groq: &str, gemini: &str, anthropic: &str) -> String {
 }
 
 #[tokio::test]
-#[ignore = "F1-7"]
 async fn alias_routes_to_the_class_and_the_rest_to_passthrough() {
     let (groq, gemini) = mocks().await;
     let anth = MockServer::start().await;
@@ -1552,7 +1551,6 @@ async fn alias_routes_to_the_class_and_the_rest_to_passthrough() {
 
 /// Com alias o usuário tirou o modelo da Anthropic: `count_tokens` também fica aqui.
 #[tokio::test]
-#[ignore = "F1-7"]
 async fn alias_applies_to_count_tokens() {
     let (groq, gemini) = mocks().await;
     let anth = MockServer::start().await;
@@ -1582,7 +1580,6 @@ async fn alias_applies_to_count_tokens() {
 
 /// Sem `[aliases]`, `claude-haiku-*` é passthrough como outro `claude-*`.
 #[tokio::test]
-#[ignore = "F1-7"]
 async fn no_aliases_means_passthrough() {
     let anth = MockServer::start().await;
     Mock::given(method("POST"))

@@ -205,7 +205,12 @@ pub(super) async fn count_tokens(
             return error_response(StatusCode::BAD_REQUEST, &format!("corpo inválido: {e}"));
         }
     };
-    if !model_only.model.starts_with("kax/") {
+    let st = app.view();
+    let class = st
+        .config()
+        .resolve_alias(&model_only.model)
+        .unwrap_or(&model_only.model);
+    if !class.starts_with("kax/") {
         return passthrough(app, uri, headers, body, &model_only.model).await;
     }
     let req: MessagesRequest = match serde_json::from_slice(&body) {
@@ -214,11 +219,10 @@ pub(super) async fn count_tokens(
             return error_response(StatusCode::BAD_REQUEST, &format!("corpo inválido: {e}"));
         }
     };
-    let st = app.view();
-    let Some(cpt) = st.scheduler().class_chars_per_token(&req.model) else {
+    let Some(cpt) = st.scheduler().class_chars_per_token(class) else {
         return error_response(
             StatusCode::NOT_FOUND,
-            &format!("classe desconhecida: {}", req.model),
+            &format!("classe desconhecida: {}", class),
         );
     };
     let translated = to_openai_request(&req);
@@ -246,7 +250,12 @@ pub(super) async fn messages(
             return error_response(StatusCode::BAD_REQUEST, &format!("corpo inválido: {e}"));
         }
     };
-    if !model_only.model.starts_with("kax/") {
+    let st = app.view();
+    let class = st
+        .config()
+        .resolve_alias(&model_only.model)
+        .unwrap_or(&model_only.model);
+    if !class.starts_with("kax/") {
         return passthrough(app, uri, headers, body, &model_only.model).await;
     }
     let st = app.view();

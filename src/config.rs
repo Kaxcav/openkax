@@ -23,6 +23,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub struct Config {
     #[serde(default)]
     pub defaults: Defaults,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub aliases: BTreeMap<String, String>,
     #[serde(default, rename = "provider")]
     pub providers: Vec<Provider>,
     #[serde(default, rename = "class")]
@@ -518,6 +520,26 @@ pub enum ConfigError {
     Invalid(Vec<String>),
 }
 
+/// Casa `s` contra `pattern` que contém apenas `*` como curinga (F1-7).
+pub fn glob_matches(pattern: &str, s: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == s;
+    }
+    if !s.starts_with(parts[0]) {
+        return false;
+    }
+    let mut remainder = &s[parts[0].len()..];
+    for &part in &parts[1..parts.len() - 1] {
+        let Some(idx) = remainder.find(part) else {
+            return false;
+        };
+        remainder = &remainder[idx + part.len()..];
+    }
+    let last = parts[parts.len() - 1];
+    remainder.ends_with(last)
+}
+
 impl Config {
     /// Parse + validação.
     pub fn from_toml_str(s: &str) -> Result<Self, ConfigError> {
@@ -544,6 +566,16 @@ impl Config {
 
     pub fn class(&self, id: &str) -> Option<&Class> {
         self.classes.iter().find(|c| c.id == id)
+    }
+
+    /// Se `model` casar com algum alias, retorna a classe de destino (`kax/...`).
+    pub fn resolve_alias<'a>(&'a self, model: &str) -> Option<&'a str> {
+        for (pattern, target) in &self.aliases {
+            if glob_matches(pattern, model) {
+                return Some(target.as_str());
+            }
+        }
+        None
     }
 
     /// Checagens semânticas; acumula todos os erros em vez de parar no primeiro.
@@ -629,6 +661,15 @@ impl Config {
                     ));
                 }
                 max_tier = max_tier.max(p.tier);
+            }
+        }
+
+        for (pattern, target) in &self.aliases {
+            if !class_ids.contains(target.as_str()) {
+                errs.push(format!(
+                    "alias {:?}: classe de destino {:?} não existe",
+                    pattern, target
+                ));
             }
         }
 
@@ -1232,5 +1273,45 @@ mod tests {
             "#,
         );
         assert!(errs.iter().any(|e| e.contains("último degrau")), "{errs:?}");
+    }
+
+    #[test]
+    fn glob_matches_cases() {
+        assert!(glob_matches("claude-haiku-*", "claude-haiku-4-5-20251001"));
+        assert!(glob_matches("claude-haiku-*", "claude-haiku-"));
+        assert!(!glob_matches("claude-haiku-*", "claude-sonnet-9"));
+        assert!(glob_matches("claude-exato", "claude-exato"));
+        assert!(!glob_matches("claude-exato", "claude-exato-2"));
+        assert!(glob_matches("*", "qualquer"));
+        assert!(glob_matches("*-fast", "kax-fast"));
+        assert!(!glob_matches("*-fast", "kax-fast-extra"));
+        assert!(glob_matches("a*b*c", "axxbxxc"));
+        assert!(!glob_matches("a*b*c", "axxbcxx"));
+    }
+
+    #[test]
+    fn alias_target_must_exist() {
+        let errs = invalid(
+            r#"
+            [aliases]
+            "claude-haiku-*" = "kax/nao-existe"
+
+            [[provider]]
+            id = "b"
+            base_url = "http://b"
+            auth = { kind = "none" }
+            models = [{ id = "m", upstream = "m" }]
+
+            [[class]]
+            id = "kax/x"
+            max_packet_tokens = 10
+            route = [{ provider = "b", model = "m" }]
+            "#,
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("classe de destino \"kax/nao-existe\" não existe")),
+            "{errs:?}"
+        );
     }
 }

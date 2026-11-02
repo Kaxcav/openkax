@@ -686,6 +686,7 @@ fn choose(
         };
         wire.error(status, "invalid_request_error", &e.to_string())
     };
+    let class = st.config().resolve_alias(&req.model).unwrap_or(&req.model);
     if let Some(pin) = header_str(headers, PIN_HEADER) {
         let Some((provider, model)) = pin.split_once('/') else {
             return Err(wire.error(
@@ -696,7 +697,7 @@ fn choose(
         };
         return st
             .scheduler()
-            .pick_pinned(&req.model, provider, model, req)
+            .pick_pinned(class, provider, model, req)
             .map_err(|e| match e {
                 PinError::Pick(e) => pick_err(e),
                 PinError::UnknownTarget => wire.error(
@@ -742,7 +743,7 @@ fn choose(
         max_tier,
     };
     st.scheduler()
-        .pick_with(&req.model, req, &opts)
+        .pick_with(class, req, &opts)
         .map_err(pick_err)
 }
 
