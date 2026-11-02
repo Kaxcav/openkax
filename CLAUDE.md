@@ -15,6 +15,12 @@ Modo B (MCP com pacote enxuto) é o principal. Modo A (rewrite de modelo via `AN
 **Fase 0 — Core do gateway.** Critério de saída: 4 testes de fallback com `wiremock` passando (429→próximo; timeout 1º token→próximo; erro pós-1º-token→encerra limpo; TPM insuficiente→provider pulado sem request), Continue/Cline funcionando via classes, binário < 8 MB.
 Não iniciar Fase 1 antes disso. Atualize esta seção ao mudar de fase.
 
+## Ambientes (ver ADR 0001)
+- **Dev e testes rodam em Linux** (WSL2 Ubuntu no notebook; o repo fica em `~/openkax`, ext4). Todos os comandos que você propuser são **bash em Linux**, nunca PowerShell.
+- O notebook tem WDAC em modo enforce: **nenhum `.exe` não assinado roda no host**. Não tente executar o binário Windows lá; rode o binário Linux dentro do WSL (`127.0.0.1:8000`) — clientes no Windows alcançam via `localhost:8000`.
+- O `.exe` de release é construído pelo GitHub Actions (`windows-latest`) e no PC de casa. Código é cross-platform; integração com SO (tray, autostart, paths) isolada atrás de um trait `Platform`.
+- Validação de chaves: `./doctor.sh` (Linux) ou `.\doctor.ps1` (Windows sem WDAC).
+
 ## Stack e regras de código
 - Rust estável. `tokio` (2 workers), `axum`, `reqwest` (rustls, **sem openssl**), `serde`, `toml`, `tracing`, `bytes`, `futures`, `rmcp`, `notify`.
 - Sem SQLite na v1. Ledger JSONL; buckets em snapshot JSON.
