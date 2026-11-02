@@ -5,8 +5,11 @@
 //! o runner (apply + verify) fica no fim deste módulo.
 
 use std::path::Path;
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
+
+use crate::config::{Auth, Config};
 
 /// Timeout padrão por comando, em segundos.
 pub const DEFAULT_TIMEOUT_S: u64 = 300;
@@ -34,6 +37,11 @@ pub struct VerifyConfig {
     /// Regras por linguagem/glob.
     #[serde(default, rename = "language")]
     pub languages: Vec<LanguageRule>,
+    /// Variáveis extras (além de [`ENV_ALLOWLIST`]) repassadas aos comandos de
+    /// verify. Nunca segredo: `*_KEY`, `*_TOKEN`, `*_SECRET` e os `auth.env`
+    /// do `providers.toml` são recusados.
+    #[serde(default)]
+    pub env_passthrough: Vec<String>,
 }
 
 /// Comandos de verify de uma linguagem.
@@ -104,8 +112,88 @@ impl VerifyConfig {
                 return bad(format!("language {:?}: timeout_s deve ser > 0", l.name));
             }
         }
+        for name in &self.env_passthrough {
+            if name.is_empty() || name.contains(['=', '\0']) {
+                return bad(format!("env_passthrough: nome inválido {name:?}"));
+            }
+            let upper = name.to_ascii_uppercase();
+            if SECRET_SUFFIXES.iter().any(|s| upper.ends_with(s)) {
+                return bad(format!(
+                    "env_passthrough: {name:?} parece segredo (*_KEY, *_TOKEN, *_SECRET)"
+                ));
+            }
+        }
         Ok(())
     }
+
+    /// Recusa `env_passthrough` que repasse variável usada pelos providers
+    /// (`auth.env` ou `${VAR}` em `base_url`/headers).
+    pub fn check_provider_secrets(&self, providers: &Config) -> Result<(), VerifyConfigError> {
+        let mut secret: Vec<String> = Vec::new();
+        for p in &providers.providers {
+            if let Auth::Bearer { env } = &p.auth {
+                secret.push(env.clone());
+            }
+            secret.extend(p.env_refs());
+        }
+        match self
+            .env_passthrough
+            .iter()
+            .find(|n| secret.iter().any(|s| s.eq_ignore_ascii_case(n)))
+        {
+            Some(n) => Err(VerifyConfigError::Invalid(format!(
+                "env_passthrough: {n:?} é credencial de provider no providers.toml"
+            ))),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Sufixos de nome que nunca passam por `env_passthrough`.
+const SECRET_SUFFIXES: [&str; 3] = ["_KEY", "_TOKEN", "_SECRET"];
+
+/// Únicas variáveis do ambiente do openkax que os processos do verify e o
+/// `git` herdam (as que existirem). As chaves de API que o `.env` põe no
+/// ambiente ficam de fora: o verify roda código do operário (ADR 0007).
+pub const ENV_ALLOWLIST: [&str; 23] = [
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "SystemRoot",
+    "SystemDrive",
+    "windir",
+    "ComSpec",
+    "PATHEXT",
+    "LANG",
+    "LC_ALL",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "RUST_BACKTRACE",
+    "GIT_EXEC_PATH",
+];
+
+/// Zera o ambiente de `cmd` e copia do atual só [`ENV_ALLOWLIST`] + `extra`.
+pub fn clean_env<'a>(cmd: &'a mut Command, extra: &[String]) -> &'a mut Command {
+    cmd.env_clear();
+    let names = ENV_ALLOWLIST
+        .iter()
+        .copied()
+        .chain(extra.iter().map(String::as_str));
+    for name in names {
+        if let Some(v) = std::env::var_os(name) {
+            cmd.env(name, v);
+        }
+    }
+    cmd
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +201,7 @@ impl VerifyConfig {
 // ---------------------------------------------------------------------------
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -149,11 +237,13 @@ pub struct VerifyReport {
     pub outcomes: Vec<CommandOutcome>,
 }
 
-/// Limites de execução.
-#[derive(Debug, Clone, Copy)]
+/// Limites e ambiente de execução.
+#[derive(Debug, Clone)]
 pub struct RunOptions {
     pub timeout: Duration,
     pub max_log_bytes: usize,
+    /// Repassadas aos comandos além de [`ENV_ALLOWLIST`] (já validadas).
+    pub env_passthrough: Vec<String>,
 }
 
 impl RunOptions {
@@ -161,6 +251,7 @@ impl RunOptions {
         Self {
             timeout: Duration::from_secs(cfg.timeout_s),
             max_log_bytes: cfg.max_log_bytes,
+            env_passthrough: cfg.env_passthrough.clone(),
         }
     }
 }
@@ -170,6 +261,7 @@ impl Default for RunOptions {
         Self {
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_S),
             max_log_bytes: DEFAULT_MAX_LOG_BYTES,
+            env_passthrough: Vec::new(),
         }
     }
 }
@@ -215,7 +307,7 @@ fn ensure_worktree(dir: &Path) -> Result<(), RunError> {
 /// O diff vai por stdin; falha de apply vira `ApplyRejected` com o log do git.
 pub fn apply_diff(worktree: &Path, diff: &str, max_log_bytes: usize) -> Result<(), RunError> {
     ensure_worktree(worktree)?;
-    let mut child = Command::new("git")
+    let mut child = clean_env(&mut Command::new("git"), &[])
         .args(["apply", "--index", "--whitespace=nowarn", "-"])
         .current_dir(worktree)
         .stdin(Stdio::piped())
@@ -237,12 +329,13 @@ pub fn apply_diff(worktree: &Path, diff: &str, max_log_bytes: usize) -> Result<(
 }
 
 /// Executa os comandos em ordem no worktree; para no primeiro que falhar.
-/// Os comandos vêm só do pacote/verify.toml, nunca de texto do operário.
+/// Os comandos vêm só do pacote/verify.toml, nunca de texto do operário, e
+/// rodam com o ambiente limpo ([`clean_env`]).
 pub fn run_verify(
     worktree: &Path,
     commands: &[String],
     expect: &str,
-    opts: RunOptions,
+    opts: &RunOptions,
 ) -> Result<VerifyReport, RunError> {
     ensure_worktree(worktree)?;
     let want = parse_expect(expect)?;
@@ -305,7 +398,7 @@ fn run_command(
     worktree: &Path,
     cmd: &str,
     want: i32,
-    opts: RunOptions,
+    opts: &RunOptions,
 ) -> Result<CommandOutcome, RunError> {
     // stdout e stderr no mesmo arquivo temporário preservam a ordem de saída.
     let log_path = std::env::temp_dir().join(format!(
@@ -314,7 +407,7 @@ fn run_command(
         LOG_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
     let log_file = std::fs::File::create(&log_path)?;
-    let spawned = shell_command(cmd)
+    let spawned = clean_env(&mut shell_command(cmd), &opts.env_passthrough)
         .current_dir(worktree)
         .stdin(Stdio::null())
         .stdout(log_file.try_clone()?)
@@ -384,6 +477,47 @@ mod tests {
         ));
         assert!(VerifyConfig::parse("timeout_s = 0").is_err());
     }
+
+    #[test]
+    fn env_passthrough_refuses_secret_like_names() {
+        let ok =
+            VerifyConfig::parse("env_passthrough = [\"DATABASE_URL\", \"RUSTFLAGS\"]").unwrap();
+        assert_eq!(ok.env_passthrough, ["DATABASE_URL", "RUSTFLAGS"]);
+        for name in ["GROQ_API_KEY", "github_token", "AWS_SECRET", "", "A=B"] {
+            let text = format!("env_passthrough = [{name:?}]");
+            assert!(
+                matches!(
+                    VerifyConfig::parse(&text),
+                    Err(VerifyConfigError::Invalid(_))
+                ),
+                "{name:?} deveria ser recusado"
+            );
+        }
+    }
+
+    #[test]
+    fn env_passthrough_refuses_provider_credentials() {
+        let providers = Config::from_toml_str(
+            r#"
+            [[provider]]
+            id = "p"
+            base_url = "https://api/${ACCOUNT_ID}/v1"
+            auth = { kind = "bearer", env = "PROVIDER_CRED" }
+            models = [{ id = "m", upstream = "m" }]
+            "#,
+        )
+        .unwrap();
+        for name in ["PROVIDER_CRED", "provider_cred", "ACCOUNT_ID"] {
+            let cfg = VerifyConfig::parse(&format!("env_passthrough = [{name:?}]")).unwrap();
+            let e = cfg.check_provider_secrets(&providers).unwrap_err();
+            assert!(
+                e.to_string().contains("credencial de provider"),
+                "{name}: {e}"
+            );
+        }
+        let cfg = VerifyConfig::parse("env_passthrough = [\"DATABASE_URL\"]").unwrap();
+        cfg.check_provider_secrets(&providers).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -438,7 +572,7 @@ mod runner_tests {
             d.path(),
             &cmds(&["git grep -q hello -- a.txt"]),
             "exit 0",
-            RunOptions::default(),
+            &RunOptions::default(),
         )
         .unwrap();
         assert!(r.passed, "{r:?}");
@@ -452,7 +586,7 @@ mod runner_tests {
             d.path(),
             &cmds(&["git grep -q hello -- a.txt", "git --version"]),
             "exit 0",
-            RunOptions::default(),
+            &RunOptions::default(),
         )
         .unwrap();
         assert!(!r.passed);
@@ -467,7 +601,7 @@ mod runner_tests {
             d.path(),
             &cmds(&["exit 3"]),
             "exit 3",
-            RunOptions::default(),
+            &RunOptions::default(),
         )
         .unwrap();
         assert!(r.passed);
@@ -476,7 +610,7 @@ mod runner_tests {
                 d.path(),
                 &cmds(&["exit 0"]),
                 "talvez",
-                RunOptions::default()
+                &RunOptions::default()
             ),
             Err(RunError::BadExpect(_))
         ));
@@ -488,9 +622,10 @@ mod runner_tests {
         let opts = RunOptions {
             timeout: Duration::from_millis(500),
             max_log_bytes: 4096,
+            ..RunOptions::default()
         };
         let t = Instant::now();
-        let r = run_verify(d.path(), &cmds(&[SLEEP]), "exit 0", opts).unwrap();
+        let r = run_verify(d.path(), &cmds(&[SLEEP]), "exit 0", &opts).unwrap();
         assert!(t.elapsed() < Duration::from_secs(20), "não esperou o sleep");
         assert!(!r.passed);
         assert!(r.outcomes[0].timed_out);
@@ -506,8 +641,9 @@ mod runner_tests {
         let opts = RunOptions {
             timeout: Duration::from_secs(60),
             max_log_bytes: 100,
+            ..RunOptions::default()
         };
-        let r = run_verify(d.path(), &cmds(&[cmd]), "exit 0", opts).unwrap();
+        let r = run_verify(d.path(), &cmds(&[cmd]), "exit 0", &opts).unwrap();
         let o = &r.outcomes[0];
         assert!(o.truncated);
         assert!(o.log.len() <= 100);
@@ -545,9 +681,61 @@ mod runner_tests {
                 d.path(),
                 &cmds(&["git --version"]),
                 "exit 0",
-                RunOptions::default()
+                &RunOptions::default()
             ),
             Err(RunError::NotAWorktree(_))
         ));
+    }
+
+    #[cfg(windows)]
+    fn echo_var(name: &str) -> String {
+        format!("echo %{name}%")
+    }
+    #[cfg(not(windows))]
+    fn echo_var(name: &str) -> String {
+        format!("echo \"${name}\"")
+    }
+
+    /// C1: a chave que o `.env` põe no ambiente do openkax não chega ao verify.
+    #[test]
+    fn verify_does_not_inherit_api_keys() {
+        // SAFETY: variável exclusiva deste teste; std serializa o acesso ao ambiente.
+        unsafe { std::env::set_var("OPENKAX_FAKE_API_KEY", "vazou-123") };
+        let d = repo();
+        let cmd = echo_var("OPENKAX_FAKE_API_KEY");
+        let r = run_verify(d.path(), &[cmd], "exit 0", &RunOptions::default()).unwrap();
+        assert!(r.passed, "{r:?}");
+        assert!(!r.outcomes[0].log.contains("vazou-123"), "{r:?}");
+    }
+
+    /// Controle do teste acima: a expansão funciona e `env_passthrough` repassa
+    /// só o que foi pedido.
+    #[test]
+    fn env_passthrough_reaches_verify() {
+        // SAFETY: variável exclusiva deste teste; std serializa o acesso ao ambiente.
+        unsafe { std::env::set_var("OPENKAX_TEST_PASSTHRU", "ok-456") };
+        let d = repo();
+        let cmd = vec![echo_var("OPENKAX_TEST_PASSTHRU")];
+        let sem = run_verify(d.path(), &cmd, "exit 0", &RunOptions::default()).unwrap();
+        assert!(!sem.outcomes[0].log.contains("ok-456"), "{sem:?}");
+        let opts = RunOptions {
+            env_passthrough: vec!["OPENKAX_TEST_PASSTHRU".into()],
+            ..RunOptions::default()
+        };
+        let com = run_verify(d.path(), &cmd, "exit 0", &opts).unwrap();
+        assert!(com.outcomes[0].log.contains("ok-456"), "{com:?}");
+    }
+
+    #[test]
+    fn path_survives_clean_env() {
+        let d = repo();
+        let r = run_verify(
+            d.path(),
+            &cmds(&["git --version"]),
+            "exit 0",
+            &RunOptions::default(),
+        )
+        .unwrap();
+        assert!(r.passed, "{r:?}");
     }
 }

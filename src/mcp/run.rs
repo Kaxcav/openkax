@@ -5,7 +5,7 @@
 //! (`AppState::complete`): pick, reserva, settle e ledger de request são os
 //! normais; aqui só se decide qual provider pular na tentativa seguinte.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
 use axum::http::StatusCode;
@@ -14,6 +14,7 @@ use serde_json::Value;
 use super::{
     TaskPacket, TaskResult, TaskStatus, TokenUsage, WorkerOutput, build_request, parse_response,
 };
+use crate::config::Config;
 use crate::ledger::{self, LedgerEntry, TaskRecord};
 use crate::server::{AppState, PROVIDER_HEADER};
 use crate::translate::openai::MessageContent;
@@ -132,7 +133,7 @@ async fn attempt_loop(
                 return TaskStatus::NeedsLead;
             }
         }
-        match one_attempt(app, &wt.path, packet, feedback.as_deref(), opts, st).await {
+        match one_attempt(app, &wt.path, packet, feedback.as_deref(), &opts, st).await {
             Ok(()) => {
                 let msg = format!("kax({}): {}", packet.id, packet.objective.trim());
                 let path = wt.path.clone();
@@ -157,12 +158,23 @@ async fn attempt_loop(
 }
 
 /// Opções do verify: `<repo>/.kax/verify.toml` se existir, senão os padrões.
+/// Um `env_passthrough` não vazio é conferido contra as credenciais do
+/// `providers.toml` (o mesmo `OPENKAX_CONFIG` do `openkax mcp`).
 fn verify_options(repo: &Path) -> Result<RunOptions, String> {
     let path = repo.join(".kax").join("verify.toml");
     if !path.is_file() {
         return Ok(RunOptions::default());
     }
     let cfg = VerifyConfig::load(&path).map_err(|e| e.to_string())?;
+    if !cfg.env_passthrough.is_empty() {
+        let providers = PathBuf::from(
+            std::env::var_os("OPENKAX_CONFIG").unwrap_or_else(|| "providers.toml".into()),
+        );
+        let providers = Config::load(&providers)
+            .map_err(|e| format!("env_passthrough: não deu para conferir o providers.toml: {e}"))?;
+        cfg.check_provider_secrets(&providers)
+            .map_err(|e| e.to_string())?;
+    }
     Ok(RunOptions::from_config(&cfg))
 }
 
@@ -171,7 +183,7 @@ async fn one_attempt(
     wt: &Path,
     packet: &TaskPacket,
     feedback: Option<&str>,
-    opts: RunOptions,
+    opts: &RunOptions,
     st: &mut Progress,
 ) -> Result<(), Failure> {
     let (max_packet, cpt) = app
@@ -218,13 +230,14 @@ async fn one_attempt(
         .await
         .unwrap_or_default();
 
-    let (path, cmds, expect) = (
+    let (path, cmds, expect, opts) = (
         wt.to_owned(),
         packet.accept.verify.clone(),
         packet.accept.expect.clone(),
+        opts.clone(),
     );
     let t0 = Instant::now();
-    let report = blocking(move || verify::run_verify(&path, &cmds, &expect, opts))
+    let report = blocking(move || verify::run_verify(&path, &cmds, &expect, &opts))
         .await
         .map_err(Failure::Stop)?;
     st.verify_ms += t0.elapsed().as_millis() as u64;

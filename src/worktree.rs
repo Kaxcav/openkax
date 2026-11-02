@@ -55,8 +55,10 @@ pub fn validate_task_id(id: &str) -> Result<(), WorktreeError> {
     }
 }
 
+/// `git` com o ambiente limpo: o worktree passa por código do operário no
+/// verify (hooks, config), então nenhuma chave do processo vai junto (C1).
 fn git(repo: &Path, args: &[&str]) -> Result<String, WorktreeError> {
-    let out = Command::new("git")
+    let out = crate::verify::clean_env(&mut Command::new("git"), &[])
         .arg("-C")
         .arg(repo)
         .args(args)
