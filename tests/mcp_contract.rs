@@ -349,7 +349,9 @@ fn report_returns_acceptance_by_class() {
     let mut mcp = Mcp::spawn();
     let resp = mcp.call("report", json!({ "period": "week" }));
     assert_ne!(resp["result"]["isError"], json!(true), "{resp}");
-    assert!(text_of(&resp)["by_class"].is_object());
+    let out = text_of(&resp);
+    assert!(out["tasks_by_class"].is_object(), "{out}");
+    assert!(out["requests_by_class"].is_object(), "{out}");
 }
 
 /// Memória privada (bytes) do processo no Windows; `None` fora dele.
