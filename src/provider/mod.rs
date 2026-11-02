@@ -70,14 +70,16 @@ impl fmt::Debug for Secrets {
 
 /// Falha de uma tentativa upstream, já classificada.
 ///
-/// Mapeamento → ação do scheduler (detalhado no plano do scheduler):
+/// Mapeamento → ação do scheduler (ADR 0003, F0-17):
 /// - [`RequestFault`](Self::RequestFault): pula o candidato, **sem** cooldown.
-/// - [`Auth`](Self::Auth): provider `Disabled` até reload.
-/// - [`RateLimited`](Self::RateLimited): cooldown honrando `Retry-After`.
-/// - [`Server`](Self::Server) / [`Timeout`](Self::Timeout) / [`Network`](Self::Network):
-///   cooldown da tabela.
-/// - [`OtherClient`](Self::OtherClient): cooldown `on_4xx_other_s`.
-/// - [`MidStream`](Self::MidStream): sem fallback; encerra o stream do cliente.
+/// - [`Auth`](Self::Auth): **provider** `Disabled` até reload.
+/// - [`Network`](Self::Network): cooldown `on_timeout_s` no **provider**.
+/// - [`RateLimited`](Self::RateLimited): cooldown honrando `Retry-After`, no
+///   modelo se ele tem `limits` próprios, senão no provider.
+/// - [`Server`](Self::Server) / [`Protocol`](Self::Protocol) /
+///   [`MidStream`](Self::MidStream) (`on_5xx_s`), timeouts (`on_timeout_s`),
+///   [`OtherClient`](Self::OtherClient) (`on_4xx_other_s`): cooldown só no **modelo**.
+/// - [`MidStream`](Self::MidStream): além disso, sem fallback; encerra o stream do cliente.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum UpstreamError {
     /// 400/413/422 que é culpa da request (contexto, parâmetro). `message` é o

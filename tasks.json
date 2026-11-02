@@ -104,9 +104,9 @@
     },
     {
       "id": "F0-17",
-      "title": "Decidir: cooldown de 5xx/timeout no escopo do modelo quando ele tem limits próprios (Gemini flash derrubou flash-lite)",
-      "owner": "user",
-      "status": "todo"
+      "title": "Cooldown por tipo de erro: provider (auth, rede) × modelo (5xx, protocolo, timeouts, 4xx, pós-1º-token); 429 inalterado (ADR 0003)",
+      "owner": "lead",
+      "status": "done"
     },
     {
       "id": "F0-18",

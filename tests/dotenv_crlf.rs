@@ -22,7 +22,8 @@ fn dotenvy_strips_cr_from_values() {
     assert_eq!(get("KAX_D"), Some(""));
     assert_eq!(get("KAX_E"), Some("fim"));
     assert!(
-        got.iter().all(|(k, v)| !k.contains('\r') && !v.contains('\r')),
+        got.iter()
+            .all(|(k, v)| !k.contains('\r') && !v.contains('\r')),
         "\\r vazou para nome ou valor"
     );
 }

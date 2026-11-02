@@ -23,7 +23,8 @@ Além disso, requests concorrentes podem passar juntas pela checagem de saldo e 
   - 401/403 → **provider** `Disabled` até reload.
   - 404 → só o **modelo** `Disabled` até reload.
   - 429 → cooldown no escopo que estourou: o modelo, se ele tem `limits` próprios; senão o provider. O bucket RPM desse escopo é zerado.
-  - 5xx, timeout, erro de rede, erro de protocolo e outros 4xx → cooldown do **provider** pela tabela `cooldown`.
+  - Erro de rede (connect/DNS/TLS) → cooldown `on_timeout_s` do **provider**.
+  - 5xx, erro de protocolo, morte no meio do stream (`on_5xx_s`), timeout de 1º token ou total (`on_timeout_s`) e outros 4xx (`on_4xx_other_s`) → cooldown só do **modelo** (revisão F0-17, abaixo).
   - 400/413/422 (culpa da request) → nenhum cooldown. Um contador `request_faults` no modelo é exposto em `/quota`, e no despacho entra no máximo 1 candidato extra antes de devolver o erro ao cliente (A3).
 - Teto do cooldown de 429 = tempo até o próximo reset diário do escopo (A4). Se o RPD/TPD do escopo zerou ou o corpo indica cota diária, o cooldown vai até o reset.
 
@@ -35,7 +36,7 @@ Além disso, requests concorrentes podem passar juntas pela checagem de saldo e 
 |---|---|---|---|
 | `settle(usage)` | reconcilia com `usage` real (refund ou charge); recalibra chars/token por EMA | contada | — |
 | `fail(err)` antes do 1º token | devolvidos | contada | transição da tabela acima |
-| `fail(err)` depois do 1º token (vindo do upstream) | cobra o estimado pelo texto transmitido | contada | cooldown `on_5xx_s` no provider |
+| `fail(err)` depois do 1º token (vindo do upstream) | cobra o estimado pelo texto transmitido | contada | cooldown `on_5xx_s` no modelo |
 | `Drop` antes do 1º token | devolvidos | contada | **nenhuma** |
 | `Drop` depois do 1º token (cliente desconectou) | cobra o estimado pelo texto transmitido | contada | **nenhuma** |
 
@@ -57,6 +58,16 @@ Para o Groq: cap 2000, então 6000 (pacote máximo de `coder-fast`) + 2000 = 800
 - `stream_options.include_usage = true` é enviado a todo provider sem a quirk `no_stream_usage`. `strip_params` roda por último e pode remover qualquer campo.
 - Providers com IDs ainda não verificados ficam `enabled = false` (dispensam `upstream`).
 - Pago sempre por último em cada rota (validado no parse).
+
+### Revisão F0-17 (2026-11-02) — escopo do cooldown pelo tipo de erro
+
+No smoke, um timeout de 1º token do `gemini-flash` derrubou o `gemini-flash-lite` (mesmo provider, cota separada), porque toda falha não-429 esfriava o provider. Regra nova: o escopo segue **quem** falhou.
+
+- **Provider**: o que quebra a conta ou a conexão para todos os modelos — `Auth` (401/403, `Disabled`) e `Network` (connect/DNS/TLS, `on_timeout_s`).
+- **Modelo**: o que é do modelo que respondeu (ou não) — `Server`, `Protocol`, `MidStream`, `FirstTokenTimeout`, `RequestTimeout`, `OtherClient` e o `fail()` depois do 1º token.
+- **429**: inalterado (modelo se tem `limits` próprios, senão provider).
+
+Consequência: um provider com upstream inteiro fora do ar responde com 5xx a cada modelo; cada um gasta uma tentativa antes de esfriar. Aceito: o custo é 1 request por modelo da rota, e é o mesmo que já se paga com 404.
 
 ## Consequências
 

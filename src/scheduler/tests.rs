@@ -589,29 +589,124 @@ fn rpd_exhausted_rate_limit_waits_for_reset() {
     assert_eq!(d, Some(Duration::from_secs(4 * 3600)));
 }
 
+/// Dois modelos irmãos com limites próprios (o caso Gemini flash / flash-lite).
+const SIBLINGS: &str = r#"
+    [[provider]]
+    id = "gemini"
+    base_url = "http://g"
+    auth = { kind = "none" }
+    models = [
+      { id = "gemini-flash", upstream = "f", limits = { rpm = 10 } },
+      { id = "gemini-flash-lite", upstream = "fl", limits = { rpm = 10 } },
+    ]
+    cooldown = { on_429_s = 1, on_5xx_s = 20, on_timeout_s = 30, on_4xx_other_s = 600 }
+
+    [[class]]
+    id = "kax/t"
+    max_packet_tokens = 100000
+    route = [{ provider = "gemini", model = "gemini-flash" }, { provider = "gemini", model = "gemini-flash-lite" }]
+"#;
+
+fn fail_flash(f: &Fx, err: &UpstreamError) -> Option<Duration> {
+    let p = f.pick(&req(10));
+    assert_eq!(&*p.candidates[0].model_id, "gemini-flash");
+    f.s.reserve(&p.candidates[0]).unwrap().fail(err)
+}
+
+fn is_cooldown(s: Option<ProviderState>) -> bool {
+    matches!(s, Some(ProviderState::Cooldown { .. }))
+}
+
+/// F0-17: erro do modelo (5xx, protocolo, timeout, 4xx genérico) esfria só o
+/// modelo; o irmão do mesmo provider continua elegível.
 #[test]
-fn server_timeout_network_and_other_4xx_use_cooldown_table() {
-    let table =
-        "cooldown = { on_429_s = 1, on_5xx_s = 20, on_timeout_s = 30, on_4xx_other_s = 600 }";
+fn model_errors_cool_only_the_model() {
     for (err, secs) in [
         (UpstreamError::Server { status: 503 }, 20),
         (UpstreamError::Protocol("eof".into()), 20),
+        (UpstreamError::MidStream("eof".into()), 20),
         (UpstreamError::FirstTokenTimeout, 30),
         (UpstreamError::RequestTimeout, 30),
-        (UpstreamError::Network("refused".into()), 30),
         (UpstreamError::OtherClient { status: 418 }, 600),
     ] {
-        let f = fx(&single(table, ""));
-        let d = f.reserve(10).fail(&err);
-        assert_eq!(d, Some(Duration::from_secs(secs)), "{err:?}");
+        let f = fx(SIBLINGS);
+        assert_eq!(
+            fail_flash(&f, &err),
+            Some(Duration::from_secs(secs)),
+            "{err:?}"
+        );
+        assert_eq!(
+            f.s.provider_state("gemini"),
+            Some(ProviderState::Healthy),
+            "{err:?}"
+        );
         assert!(
-            matches!(
-                f.s.provider_state("p"),
-                Some(ProviderState::Cooldown { .. })
-            ),
+            is_cooldown(f.s.model_state("gemini", "gemini-flash")),
+            "{err:?}"
+        );
+        assert_eq!(
+            f.s.model_state("gemini", "gemini-flash-lite"),
+            Some(ProviderState::Healthy),
             "{err:?}"
         );
     }
+}
+
+/// F0-17: timeout no gemini-flash não bloqueia o gemini-flash-lite.
+#[test]
+fn timeout_on_flash_does_not_block_flash_lite() {
+    let f = fx(SIBLINGS);
+    fail_flash(&f, &UpstreamError::FirstTokenTimeout);
+    let p = f.pick(&req(10));
+    assert_eq!(p.candidates.len(), 1, "{p:?}");
+    assert_eq!(&*p.candidates[0].model_id, "gemini-flash-lite");
+    assert!(approx(cooldown(p.skipped[0].1.clone()), 30.0));
+}
+
+/// F0-17: erro de conexão (rede/DNS/TLS) é do provider: bloqueia os dois modelos.
+#[test]
+fn network_error_blocks_every_model_of_the_provider() {
+    let f = fx(SIBLINGS);
+    let d = fail_flash(&f, &UpstreamError::Network("connect refused".into()));
+    assert_eq!(d, Some(Duration::from_secs(30)));
+    assert!(is_cooldown(f.s.provider_state("gemini")));
+    let p = f.pick(&req(10));
+    assert!(p.candidates.is_empty(), "{p:?}");
+    assert_eq!(p.skipped.len(), 2);
+    for (_, s) in p.skipped {
+        assert!(approx(cooldown(s), 30.0));
+    }
+}
+
+/// F0-17: auth continua no escopo do provider (desabilita os dois).
+#[test]
+fn auth_error_blocks_every_model_of_the_provider() {
+    let f = fx(SIBLINGS);
+    fail_flash(&f, &UpstreamError::Auth { status: 403 });
+    let p = f.pick(&req(10));
+    assert!(p.candidates.is_empty(), "{p:?}");
+    assert!(
+        p.skipped
+            .iter()
+            .all(|(_, s)| *s == Skip::Disabled(DisabledReason::AuthRejected))
+    );
+}
+
+/// F0-17: falha depois do 1º token (`fail` com `started`) esfria só o modelo.
+#[test]
+fn failure_after_first_token_cools_only_the_model() {
+    let f = fx(SIBLINGS);
+    let p = f.pick(&req(10));
+    let mut r = f.s.reserve(&p.candidates[0]).unwrap();
+    r.first_token();
+    let d = r.fail(&UpstreamError::Network("reset".into()));
+    assert_eq!(d, Some(Duration::from_secs(20)));
+    assert_eq!(f.s.provider_state("gemini"), Some(ProviderState::Healthy));
+    assert!(is_cooldown(f.s.model_state("gemini", "gemini-flash")));
+    assert_eq!(
+        f.s.model_state("gemini", "gemini-flash-lite"),
+        Some(ProviderState::Healthy)
+    );
 }
 
 #[test]

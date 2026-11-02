@@ -1061,12 +1061,13 @@ impl Reservation {
     /// cooldown aplicado (entra no `Retry-After`).
     pub fn fail(mut self, error: &UpstreamError) -> Option<Duration> {
         if self.started {
-            // Tokens foram gastos: cobra o estimado; instabilidade → on_5xx_s.
+            // Tokens foram gastos: cobra o estimado; o modelo falhou no meio
+            // da resposta → on_5xx_s só no escopo do modelo (F0-17).
             self.close_settle(None);
             let p = &self.shared.providers[self.provider_idx];
             let d = Duration::from_secs(p.cooldown.on_5xx_s).max(MIN_COOLDOWN);
             let now = self.shared.clock.now();
-            lock(&p.state).scope.cool(now, d);
+            lock(&p.models[self.model_idx].scope).cool(now, d);
             return Some(d);
         }
         self.close_refund();
@@ -1085,9 +1086,12 @@ impl Reservation {
         ps.scope.tick(now, utc);
         ms.tick(now, utc);
 
-        let provider_for = |secs: u64, ps: &mut ProviderScope| {
+        // F0-17: o escopo do cooldown segue o tipo do erro. Conta/conexão
+        // (auth, rede) → provider; o modelo que falhou (5xx, protocolo,
+        // timeout, 4xx genérico) → só o modelo, para não derrubar os irmãos.
+        let cool = |secs: u64, scope: &mut Scope| {
             let d = Duration::from_secs(secs).max(MIN_COOLDOWN);
-            ps.scope.cool(now, d);
+            scope.cool(now, d);
             Some(d)
         };
         match error {
@@ -1123,13 +1127,14 @@ impl Reservation {
                 target.cool(now, d);
                 Some(d)
             }
+            UpstreamError::Network(_) => cool(cd.on_timeout_s, &mut ps.scope),
             UpstreamError::Server { .. }
             | UpstreamError::Protocol(_)
-            | UpstreamError::MidStream(_) => provider_for(cd.on_5xx_s, &mut ps),
-            UpstreamError::FirstTokenTimeout
-            | UpstreamError::RequestTimeout
-            | UpstreamError::Network(_) => provider_for(cd.on_timeout_s, &mut ps),
-            UpstreamError::OtherClient { .. } => provider_for(cd.on_4xx_other_s, &mut ps),
+            | UpstreamError::MidStream(_) => cool(cd.on_5xx_s, &mut ms),
+            UpstreamError::FirstTokenTimeout | UpstreamError::RequestTimeout => {
+                cool(cd.on_timeout_s, &mut ms)
+            }
+            UpstreamError::OtherClient { .. } => cool(cd.on_4xx_other_s, &mut ms),
         }
     }
 
