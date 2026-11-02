@@ -2,6 +2,8 @@
 //! `initialize` + `tools/list`. Os testes `#[ignore = "F2-x"]` são os de aceite
 //! das próximas etapas e falham de propósito até a etapa indicada.
 
+mod common;
+
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
@@ -16,12 +18,14 @@ struct Mcp {
 
 impl Mcp {
     fn spawn() -> Self {
+        Self::spawn_with(concat!(env!("CARGO_MANIFEST_DIR"), "/providers.toml"), &[])
+    }
+
+    fn spawn_with(config: &str, envs: &[(&str, &str)]) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_openkax"))
             .arg("mcp")
-            .env(
-                "OPENKAX_CONFIG",
-                concat!(env!("CARGO_MANIFEST_DIR"), "/providers.toml"),
-            )
+            .env("OPENKAX_CONFIG", config)
+            .envs(envs.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -214,18 +218,80 @@ fn delegate_batch_validates_then_reports_not_implemented() {
 
 // --- Aceite das próximas etapas (falham de propósito até serem ligados) ---
 
-#[test]
-#[ignore = "F2-3: delegate_batch executa em worktree e devolve TaskResult accepted"]
-fn delegate_batch_returns_accepted_result() {
-    let mut mcp = Mcp::spawn();
+/// `delegate` de ponta a ponta pelo MCP: operários em `wiremock` (groq erra, gemini
+/// acerta), repo git temporário, resultado `accepted` na 2ª tentativa.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delegate_returns_accepted_result() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer};
+
+    let diff = |v: &str| {
+        format!("```diff
+--- a/value.txt
++++ b/value.txt
+@@ -1 +1 @@
+-OLD
++{v}
+```")
+    };
+    let (groq, gemini) = (MockServer::start().await, MockServer::start().await);
+    for (server, text) in [(&groq, diff("BAD")), (&gemini, diff("GOOD"))] {
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(common::sse_ok(&text))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    let repo = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let st = Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(repo.path().join("value.txt"), "OLD
+").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "init"]);
+
+    let cfg_dir = tempfile::tempdir().unwrap();
+    let cfg = cfg_dir.path().join("providers.toml");
+    std::fs::write(&cfg, common::two_provider_config(&groq.uri(), &gemini.uri())).unwrap();
+    let mut mcp = Mcp::spawn_with(
+        cfg.to_str().unwrap(),
+        &[("GROQ_API_KEY", "k-groq"), ("GEMINI_API_KEY", "k-gemini")],
+    );
+
     let resp = mcp.call(
-        "delegate_batch",
-        json!({ "repo": env!("CARGO_MANIFEST_DIR"), "base_ref": "HEAD", "tasks": [packet("T-1")] }),
+        "delegate",
+        json!({
+            "repo": repo.path().to_str().unwrap(),
+            "base_ref": "main",
+            "task": {
+                "id": "T-1",
+                "class": "kax/coder-fast",
+                "objective": "Trocar OLD por GOOD",
+                "files": [{ "path": "value.txt", "mode": "write" }],
+                "accept": { "verify": ["git grep -q GOOD -- value.txt"], "expect": "exit 0" }
+            }
+        }),
     );
     assert_ne!(resp["result"]["isError"], json!(true), "{resp}");
     let out = text_of(&resp);
-    assert_eq!(out["results"][0]["id"], "T-1");
-    assert_eq!(out["results"][0]["status"], "accepted");
+    assert_eq!(out["id"], "T-1", "{resp}");
+    assert_eq!(out["status"], "accepted", "{resp}");
+    assert_eq!(out["attempts"], 2);
+    assert_eq!(out["provider"], "gemini");
+    groq.verify().await;
+    gemini.verify().await;
 }
 
 #[test]
@@ -238,7 +304,7 @@ fn status_returns_known_batch() {
 }
 
 #[test]
-#[ignore = "F2-5: report(period) agrega o ledger"]
+#[ignore = "F2-6: report(period) agrega o ledger"]
 fn report_returns_acceptance_by_class() {
     let mut mcp = Mcp::spawn();
     let resp = mcp.call("report", json!({ "period": "week" }));

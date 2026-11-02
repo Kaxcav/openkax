@@ -195,6 +195,13 @@ impl AppState {
         &self.hub.ledger
     }
 
+    /// `(max_packet_tokens, chars_per_token)` da classe, para montar o pacote do operário.
+    pub fn packet_limits(&self, class: &str) -> Option<(u32, f64)> {
+        let v = self.view();
+        let c = v.config().class(class)?;
+        Some((c.max_packet_tokens, v.config().defaults.estimate_chars_per_token))
+    }
+
     /// Troca a config a quente (F0-10). Buckets, cooldowns e chars/token passam
     /// para a geração nova casando por id; `Disabled` volta a valer só se
     /// acontecer de novo (é "até reload"). Requests em voo terminam na antiga.
@@ -422,7 +429,6 @@ async fn chat_completions(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let st = app.view();
     let started = Instant::now();
     let req: ChatCompletionRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -434,6 +440,38 @@ async fn chat_completions(
             );
         }
     };
+    dispatch(app.view(), &headers, req, started, &[]).await
+}
+
+impl AppState {
+    /// Despacha uma request não-streaming pelo mesmo caminho do
+    /// `/v1/chat/completions` (pick, reserva, fallback, ledger), pulando os
+    /// providers em `skip_providers`. Usado pelo MCP para o retry no próximo
+    /// candidato da rota (F2-5). A resposta tem o mesmo formato do endpoint HTTP.
+    pub async fn complete(
+        &self,
+        mut req: ChatCompletionRequest,
+        skip_providers: &[String],
+    ) -> Response {
+        req.stream = Some(false);
+        dispatch(
+            self.view(),
+            &HeaderMap::new(),
+            req,
+            Instant::now(),
+            skip_providers,
+        )
+        .await
+    }
+}
+
+async fn dispatch(
+    st: View,
+    headers: &HeaderMap,
+    req: ChatCompletionRequest,
+    started: Instant,
+    skip_providers: &[String],
+) -> Response {
     let mut meta = Meta {
         route: req.model.clone(),
         est_in: 0,
@@ -450,14 +488,14 @@ async fn chat_completions(
             "esta rota aceita apenas classes kax/* (veja /v1/models)",
         );
     }
-    let pick = match choose(&st, &headers, &req) {
+    let pick = match choose(&st, headers, &req) {
         Ok(p) => p,
         Err(resp) => {
             meta.record(&st, None, None, None, Outcome::Rejected);
             return resp;
         }
     };
-    meta.pinned = header_str(&headers, PIN_HEADER).is_some();
+    meta.pinned = header_str(headers, PIN_HEADER).is_some();
     meta.est_in = pick.candidates.first().map_or(0, |c| c.est_tokens);
 
     let mut waits: Vec<Duration> = pick.retry_after().into_iter().collect();
@@ -468,6 +506,9 @@ async fn chat_completions(
     for cand in &pick.candidates {
         if fault.is_some() && attempts_after_fault >= 1 {
             break;
+        }
+        if skip_providers.iter().any(|p| **p == *cand.provider_id) {
+            continue;
         }
         let mut res = match st.scheduler().reserve(cand) {
             Ok(r) => r,
