@@ -299,9 +299,6 @@ async fn chat_completions(State(st): State<AppState>, headers: HeaderMap, body: 
     };
     meta.pinned = header_str(&headers, PIN_HEADER).is_some();
     meta.est_in = pick.candidates.first().map_or(0, |c| c.est_tokens);
-    let d = &st.config().defaults;
-    let first_token_timeout = Duration::from_millis(d.first_token_timeout_ms);
-    let first_token_timeout_reasoning = Duration::from_millis(d.first_token_timeout_reasoning_ms);
 
     let mut waits: Vec<Duration> = pick.retry_after().into_iter().collect();
     let mut fault: Option<(u16, String)> = None;
@@ -322,6 +319,10 @@ async fn chat_completions(State(st): State<AppState>, headers: HeaderMap, body: 
             }
         };
         let provider_cfg = &st.inner.resolved[cand.provider_idx];
+        let (first_token_timeout, first_token_timeout_reasoning) = st
+            .config()
+            .defaults
+            .first_token_timeouts(provider_cfg.models.get(cand.model_idx));
         let attempt = st
             .inner
             .client

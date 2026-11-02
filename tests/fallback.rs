@@ -100,6 +100,37 @@ async fn fallback_on_first_token_timeout() {
     gemini.verify().await;
 }
 
+/// F0-18: `models[].first_token_timeout_ms` sobrescreve o default só daquele
+/// modelo. O groq (800 ms até o 1º token) estouraria os 300 ms globais, mas tem
+/// 3 s próprios → atende, sem fallback.
+#[tokio::test]
+async fn model_first_token_timeout_overrides_default() {
+    let (groq, gemini) = mocks().await;
+    upstream("k-groq", "qwen-coder")
+        .respond_with(sse_ok("from-groq").set_delay(Duration::from_millis(800)))
+        .expect(1)
+        .mount(&groq)
+        .await;
+    upstream("k-gemini", "gemini-flash")
+        .respond_with(sse_ok("from-gemini"))
+        .expect(0)
+        .mount(&gemini)
+        .await;
+    let toml = two_provider_config(&groq.uri(), &gemini.uri()).replace(
+        "upstream = \"qwen-coder\",",
+        "upstream = \"qwen-coder\", first_token_timeout_ms = 3000,",
+    );
+    let gw = Gateway::spawn(&toml, SECRETS).await;
+
+    let r = gw.chat_stream("kax/coder-fast", "oi").await;
+    assert_eq!(r.status, 200, "{r:?}");
+    assert_eq!(r.provider.as_deref(), Some("groq"));
+    assert_eq!(r.sse.content(), "from-groq");
+
+    groq.verify().await;
+    gemini.verify().await;
+}
+
 /// Critério 3: stream morre depois do 1º token (EOF sem `finish_reason` nem
 /// `[DONE]`) → sem retry; cliente recebe o que já veio, um chunk final com
 /// `finish_reason: "error"` e `[DONE]`. O 2º provider não é chamado.

@@ -23,10 +23,14 @@ base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
 auth = { kind = "bearer", env = "GEMINI_API_KEY" }
 # Free tier limita por modelo. Números do plano §1.2; conferir no AI Studio.
 models = [
-  { id = "gemini-flash", upstream = "gemini-flash-latest", max_ctx = 1000000, limits = { rpm = 10, tpm = 250000, rpd = 250 }, family = "gemini" },
+  # Smoke F0-14: thinking sem deltas de raciocínio no stream → 8 s não bastam (F0-18).
+  { id = "gemini-flash", upstream = "gemini-flash-latest", max_ctx = 1000000, limits = { rpm = 10, tpm = 250000, rpd = 250 }, family = "gemini", first_token_timeout_ms = 20000 },
   { id = "gemini-flash-lite", upstream = "gemini-flash-lite-latest", max_ctx = 1000000, limits = { rpm = 10, tpm = 250000, rpd = 250 }, family = "gemini" },
 ]
 quirks = { strip_params = ["logprobs", "frequency_penalty"], tool_choice = "auto_only" }
+# Sem reasoning_effort (F0-18): em 2026-11-02 gemini-flash-latest = gemini-3.8-flash
+# (modelVersion), e a tabela da doc de compatibilidade OpenAI só define valores para
+# Gemini 4 Argon, 3.1 Flash-Lite, 3 Flash e 2.5. Reavaliar quando a doc citar o 3.8.
 cooldown = { on_429_s = 60, on_5xx_s = 20, on_timeout_s = 30, on_4xx_other_s = 600 }
 
 [[provider]]
@@ -104,10 +108,11 @@ base_url = "https://integrate.api.nvidia.com/v1"
 auth = { kind = "bearer", env = "NVIDIA_API_KEY" }
 # 40 RPM por conta. Natureza dos créditos incerta: o doctor mede. Sem max_ctx no /models.
 # Smoke 2026-11-02: moonshotai/kimi-k2.6 aparece em /models mas responde 404 → removido.
+# Fila compartilhada: 1º token passa de 8 s com frequência (F0-18) → 20 s por modelo.
 models = [
-  { id = "minimax-m3.1-flash", upstream = "minimaxai/minimax-m3.1-flash", family = "minimax" },
-  { id = "deepseek-v4.1-flash", upstream = "deepseek-ai/deepseek-v4.1-flash", family = "deepseek" },
-  { id = "gpt-oss-20b", upstream = "openai/gpt-oss-20b", family = "gpt" },
+  { id = "minimax-m3.1-flash", upstream = "minimaxai/minimax-m3.1-flash", family = "minimax", first_token_timeout_ms = 20000 },
+  { id = "deepseek-v4.1-flash", upstream = "deepseek-ai/deepseek-v4.1-flash", family = "deepseek", first_token_timeout_ms = 20000 },
+  { id = "gpt-oss-20b", upstream = "openai/gpt-oss-20b", family = "gpt", first_token_timeout_ms = 20000 },
 ]
 limits = { rpm = 40 }
 

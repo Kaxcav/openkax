@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::path::Path;
 use std::str::FromStr;
+use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -45,6 +46,20 @@ pub struct Defaults {
     pub safety_factor: f64,
     /// Horário (UTC) de reset dos buckets diários quando o escopo não define.
     pub daily_reset_utc: UtcTime,
+}
+
+impl Defaults {
+    /// `(prazo do 1º token, prazo estendido por raciocínio)` de `model`: o do
+    /// modelo quando houver; o estendido nunca fica abaixo do prazo base.
+    pub fn first_token_timeouts(&self, model: Option<&Model>) -> (Duration, Duration) {
+        let base = model
+            .and_then(|m| m.first_token_timeout_ms)
+            .unwrap_or(self.first_token_timeout_ms);
+        (
+            Duration::from_millis(base),
+            Duration::from_millis(self.first_token_timeout_reasoning_ms.max(base)),
+        )
+    }
 }
 
 impl Default for Defaults {
@@ -232,6 +247,9 @@ pub struct Model {
     /// Família do modelo ("glm", "qwen", …): filtro `x-openkax-exclude-family` (N5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub family: Option<String>,
+    /// Sobrescreve [`Defaults::first_token_timeout_ms`] para este modelo (F0-18).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_token_timeout_ms: Option<u64>,
 }
 
 /// Como autenticar no upstream. A chave em si nunca está no TOML: só o nome
@@ -525,6 +543,16 @@ impl Config {
         let mut ids = HashSet::new();
         for p in &self.providers {
             validate_provider(p, &mut errs);
+            for m in &p.models {
+                if let Some(ft) = m.first_token_timeout_ms
+                    && (ft == 0 || ft > d.request_timeout_ms)
+                {
+                    errs.push(format!(
+                        "provider {:?}, modelo {:?}: first_token_timeout_ms exige 0 < {ft} <= request_timeout_ms ({})",
+                        p.id, m.id, d.request_timeout_ms
+                    ));
+                }
+            }
             if !ids.insert(p.id.as_str()) {
                 errs.push(format!("provider duplicado: {:?}", p.id));
             }
@@ -731,6 +759,18 @@ mod tests {
                 assert!(m.family.is_some(), "{}/{} sem family", p.id, m.id);
             }
         }
+        // F0-18: NVIDIA e gemini-flash demoram mais até o 1º token.
+        for m in &c.provider("nvidia").unwrap().models {
+            assert_eq!(m.first_token_timeout_ms, Some(20_000), "nvidia/{}", m.id);
+        }
+        assert_eq!(flash.first_token_timeout_ms, Some(20_000));
+        assert_eq!(
+            gemini
+                .model("gemini-flash-lite")
+                .unwrap()
+                .first_token_timeout_ms,
+            None
+        );
         let anth = c.provider("anthropic").unwrap();
         assert_eq!(
             (anth.auth.clone(), anth.native),
@@ -770,6 +810,67 @@ mod tests {
                 "vercel",
                 "deepseek"
             ]
+        );
+    }
+
+    /// F0-18: timeout de 1º token por modelo.
+    #[test]
+    fn model_first_token_timeout_overrides_defaults() {
+        let c = Config::from_toml_str(
+            r#"
+            [defaults]
+            first_token_timeout_ms = 8000
+            first_token_timeout_reasoning_ms = 30000
+
+            [[provider]]
+            id = "a"
+            base_url = "http://a"
+            auth = { kind = "none" }
+            models = [
+              { id = "slow", upstream = "s", first_token_timeout_ms = 20000 },
+              { id = "huge", upstream = "h", first_token_timeout_ms = 45000 },
+              { id = "plain", upstream = "p" },
+            ]
+            "#,
+        )
+        .unwrap();
+        let ms = Duration::from_millis;
+        let t = |id: &str| c.defaults.first_token_timeouts(c.providers[0].model(id));
+        assert_eq!(t("slow"), (ms(20_000), ms(30_000)));
+        // raciocínio nunca encurta o prazo do modelo
+        assert_eq!(t("huge"), (ms(45_000), ms(45_000)));
+        assert_eq!(t("plain"), (ms(8_000), ms(30_000)));
+        assert_eq!(
+            c.defaults.first_token_timeouts(None),
+            (ms(8_000), ms(30_000))
+        );
+    }
+
+    #[test]
+    fn model_first_token_timeout_must_fit_request_timeout() {
+        let errs = invalid(
+            r#"
+            [defaults]
+            request_timeout_ms = 60000
+
+            [[provider]]
+            id = "a"
+            base_url = "http://a"
+            auth = { kind = "none" }
+            models = [
+              { id = "zero", upstream = "z", first_token_timeout_ms = 0 },
+              { id = "big", upstream = "b", first_token_timeout_ms = 60001 },
+            ]
+            "#,
+        );
+        let all = errs.join("\n");
+        assert!(
+            all.contains("modelo \"zero\": first_token_timeout_ms"),
+            "{all}"
+        );
+        assert!(
+            all.contains("modelo \"big\": first_token_timeout_ms"),
+            "{all}"
         );
     }
 

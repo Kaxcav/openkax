@@ -110,9 +110,10 @@
     },
     {
       "id": "F0-18",
-      "title": "Gemini flash-latest: timeout de 1º token (8s) sem deltas de raciocínio — investigar reasoning_effort documentado",
+      "title": "Timeout de 1º token por modelo (models[].first_token_timeout_ms): NVIDIA e gemini-flash = 20 s",
       "owner": "lead",
-      "status": "todo"
+      "status": "done",
+      "note": "reasoning_effort NÃO aplicado: gemini-flash-latest = gemini-3.8-flash, fora da tabela da doc OpenAI-compat (só 4 Argon, 3.1 Flash-Lite, 3 Flash, 2.5)"
     },
     {
       "id": "F0-19",
