@@ -766,12 +766,20 @@ mod tests {
             or.extra_headers.get("X-Title").map(String::as_str),
             Some("OpenKax")
         );
-        // GitHub Models foi aposentado em 2026-07-30: segue desligado.
-        assert!(!c.provider("github").unwrap().enabled);
+        // F0-22: GitHub Models (aposentado em 2026-07-30) saiu do arquivo; Vercel fica
+        // desligada (403 sem cartão) e fora de todas as rotas (conferido abaixo).
+        assert!(c.provider("github").is_none());
         assert_eq!(c.provider("deepseek").unwrap().tier, Tier::Paid);
         let vercel = c.provider("vercel").unwrap();
         assert_eq!(vercel.tier, Tier::Credit);
-        assert!(vercel.enabled);
+        assert!(!vercel.enabled);
+        for class in &c.classes {
+            assert!(
+                class.route.iter().all(|s| s.provider != "vercel"),
+                "{}: vercel na rota",
+                class.id
+            );
+        }
         // F0-21: Cloudflare habilitada, ID do catálogo vivo, janela IETF no provider.
         let cf = c.provider("cloudflare").unwrap();
         assert!(cf.enabled);
@@ -842,10 +850,8 @@ mod tests {
                 "gemini/gemini-flash",
                 "nvidia/minimax-m3.1-flash",
                 "zai/glm-4.7-flash",
-                "github/github-mini",
                 "sambanova/deepseek-v3.1",
                 "openrouter/north-mini-code",
-                "vercel/ling-3.1-flash",
                 "deepseek/deepseek-flash",
             ]
         );
@@ -860,7 +866,6 @@ mod tests {
                 "sambanova/gpt-oss-120b",
                 "nvidia/minimax-m3.1-flash",
                 "gemini/gemini-flash-lite",
-                "vercel/nemotron-3.5-lightning-free",
                 "deepseek/deepseek-flash",
             ]
         );
@@ -882,7 +887,6 @@ mod tests {
                 "gemini/gemini-flash",
                 "cloudflare/llama-4-scout",
                 "openrouter/gemma-4-31b",
-                "vercel/nemotron-3.5-lightning-free",
             ]
         );
         assert_eq!(

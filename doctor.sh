@@ -37,7 +37,7 @@ CODE=000
 req() {  # req NOME URL [args do curl...]  -> define $CODE e grava $tmpdir/NOME.json
   local name=$1 url=$2 ctype; shift 2
   read -r CODE ctype < <(curl -sS -o "$tmpdir/$name.json" -D "$tmpdir/$name.hdr" -w '%{http_code} %{content_type}\n' --max-time 25 "$@" "$url" 2>/dev/null || echo 000)
-  # 2xx que não é JSON (ex.: "OK" text/plain do GitHub Models aposentado) não vale.
+  # 2xx que não é JSON (ex.: placeholder "OK" text/plain de serviço aposentado) não vale.
   if [[ "$CODE" == 2* && "$ctype" != *json* ]]; then
     printf '\e[31m[FAIL] %-11s HTTP %s mas %s (não é JSON): %s\e[0m\n' "$name" "$CODE" "${ctype:-sem content-type}" "$(head -c 60 "$tmpdir/$name.json" | tr -d '\r\n')"
     CODE=nonjson
@@ -138,12 +138,6 @@ if [[ -n "${GROQ_API_KEY:-}" ]]; then
   [[ "$CODE" == 2* ]] && echo "       modelos visíveis: $(count_models "$tmpdir/groq.json")"
 else echo -e "\e[90m[SKIP] groq        sem GROQ_API_KEY\e[0m"; fi
 
-if [[ -n "${GITHUB_MODELS_TOKEN:-}" ]]; then
-  req github https://models.github.ai/catalog/models -H "Authorization: Bearer $GITHUB_MODELS_TOKEN" -H "Accept: application/vnd.github+json"
-  [[ "$CODE" == 2* ]] && echo "       modelos no catálogo: $(count_models "$tmpdir/github.json")"
-  [[ "$CODE" == nonjson ]] && echo -e "       \e[33mGitHub Models foi aposentado em 2026-07-30 (docs.github.com/en/rest/models).\e[0m"
-else echo -e "\e[90m[SKIP] github      sem GITHUB_MODELS_TOKEN\e[0m"; fi
-
 if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
   req openrouter https://openrouter.ai/api/v1/key -H "Authorization: Bearer $OPENROUTER_API_KEY"
   [[ "$CODE" == 2* ]] && openrouter_quota "$tmpdir/openrouter.json"
@@ -164,6 +158,7 @@ if [[ -n "${NVIDIA_API_KEY:-}" ]]; then
 else echo -e "\e[90m[SKIP] nvidia      sem NVIDIA_API_KEY\e[0m"; fi
 
 # /v1/models do AI Gateway é público; a chave só é exigida no chat.
+# Desligada no providers.toml (F0-22): o chat dá 403 sem cartão cadastrado, mesmo em modelo grátis.
 req vercel https://ai-gateway.vercel.sh/v1/models
 [[ "$CODE" == 2* ]] && echo "       modelos visíveis: $(count_models "$tmpdir/vercel.json")"
 if [[ -n "${VERCEL_AI_GATEWAY_KEY:-}" ]]; then

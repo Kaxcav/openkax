@@ -58,7 +58,7 @@
 └──────────────────────────────────────────────────────────────────┘
         │
         ▼
- Gemini · Mistral · Groq · GitHub Models · DeepSeek · OpenRouter · Anthropic
+ Gemini · Mistral · Groq · DeepSeek · OpenRouter · Anthropic
 ```
 
 ### 1.1 Classes de modelo (o editor e o lead só conhecem classes)
@@ -81,7 +81,6 @@ Regra: **nenhuma classe `kax/*` roteia para Anthropic exceto como último degrau
 | Gemini (AI Studio) | só Flash/Flash-Lite no free; ~5–15 RPM; 250k TPM; 1M ctx | espinha dorsal das requests gordas |
 | Mistral La Plateforme | 1B tok/mês, 500k TPM, **2 RPM** | request gorda e rara; Codestral |
 | Groq | por modelo, ex. 30 RPM / 1k RPD / **8k TPM** / 200k TPD | só pacotes enxutos (`coder-fast`) |
-| GitHub Models | limites diários baixos por tier | backup de `coder-smart` |
 | Cerebras | virou trial (cartão, 30 dias) | **fora** até mudar |
 | OpenRouter `:free` | 20 RPM; 50 RPD (ou 1k RPD com US$10 lifetime) | pool variado, Tier 3 |
 | DeepSeek direto | pago, centavos | degrau pago "nunca trava" |

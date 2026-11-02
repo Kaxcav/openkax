@@ -7,7 +7,7 @@
 #
 # Escopos de limite (ADR 0003):
 #   [[provider]].limits      → compartilhado pela conta/workspace (Mistral, OpenRouter, DeepSeek)
-#   models[].limits/max_ctx  → por modelo (Groq, Gemini, GitHub Models)
+#   models[].limits/max_ctx  → por modelo (Groq, Gemini, Mistral, SambaNova)
 # `models[].id` é o nome local usado nas rotas; `upstream` é o ID real, conferido em /models.
 
 [defaults]
@@ -63,19 +63,6 @@ models = [
 ]
 limits = { tokens_per_month = 1000000000 }
 quirks = { ratelimit_headers = { rpm = "x-ratelimit-remaining-req-minute", tpm = "x-ratelimit-remaining-tokens-minute" } }
-
-[[provider]]
-id = "github"
-base_url = "https://models.github.ai/inference"
-auth = { kind = "bearer", env = "GITHUB_MODELS_TOKEN" }
-# Desligado: GitHub Models foi APOSENTADO em 2026-07-30 (docs.github.com/en/rest/models:
-# "catalog, inference API … are no longer available to any customer"). O host ainda
-# responde "OK" text/plain para qualquer caminho, com certificado legítimo e sem VPN
-# (PC de casa, 2026-11-02): é placeholder, não catálogo. Candidato a sair do arquivo.
-enabled = false
-models = [
-  { id = "github-mini", max_ctx = 8000, limits = { rpm = 15, rpd = 150 }, family = "gpt" },
-]
 
 [[provider]]
 id = "openrouter"
@@ -180,6 +167,8 @@ id = "vercel"
 base_url = "https://ai-gateway.vercel.sh/v1"
 auth = { kind = "bearer", env = "VERCEL_AI_GATEWAY_KEY" }
 tier = "credit"
+# Desligado e fora das rotas (F0-22): exige cartão de crédito cadastrado (403), mesmo para modelo grátis.
+enabled = false
 # Só modelos com pricing input/output = 0 em /v1/models. Limite por modelo (valores reais: doctor).
 models = [
   { id = "nemotron-3.5-lightning-free", upstream = "nvidia/nemotron-3.5-lightning-free", max_ctx = 1000000, family = "nemotron" },
@@ -207,7 +196,6 @@ route = [
   { provider = "sambanova", model = "gpt-oss-120b" },
   { provider = "nvidia", model = "minimax-m3.1-flash" },
   { provider = "gemini", model = "gemini-flash-lite" },
-  { provider = "vercel", model = "nemotron-3.5-lightning-free" },
   { provider = "deepseek", model = "deepseek-flash" },
 ]
 
@@ -222,10 +210,8 @@ route = [
   { provider = "gemini", model = "gemini-flash" },
   { provider = "nvidia", model = "minimax-m3.1-flash" },
   { provider = "zai", model = "glm-4.7-flash" },
-  { provider = "github", model = "github-mini" },
   { provider = "sambanova", model = "deepseek-v3.1" },
   { provider = "openrouter", model = "north-mini-code" },
-  { provider = "vercel", model = "ling-3.1-flash" },
   { provider = "deepseek", model = "deepseek-flash" },
 ]
 
@@ -250,7 +236,6 @@ route = [
   { provider = "gemini", model = "gemini-flash" },
   { provider = "cloudflare", model = "llama-4-scout" },
   { provider = "openrouter", model = "gemma-4-31b" },
-  { provider = "vercel", model = "nemotron-3.5-lightning-free" },
 ]
 
 [[class]]
