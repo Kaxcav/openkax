@@ -1815,3 +1815,70 @@ async fn passthrough_preserves_duplicate_response_headers() {
         .collect();
     assert_eq!(testes, vec!["val-1", "val-2"]);
 }
+
+/// Aliases preservam a ordem de declaração do TOML: o primeiro padrão que casar vence.
+#[tokio::test]
+async fn aliases_preserve_declaration_order() {
+    let (groq, gemini) = mocks().await;
+    upstream("k-groq", "qwen-coder")
+        .respond_with(sse_ok("via-classe-A"))
+        .mount(&groq)
+        .await;
+    upstream("k-gemini", "gemini-flash")
+        .respond_with(sse_ok("via-classe-B"))
+        .mount(&gemini)
+        .await;
+
+    let cfg = format!(
+        r#"
+        [aliases]
+        "claude-haiku-4*" = "kax/classe-a"
+        "claude-*" = "kax/classe-b"
+
+        [defaults]
+        request_timeout_ms = 5000
+        first_token_timeout_ms = 300
+        estimate_chars_per_token = 3.6
+
+        [[provider]]
+        id = "groq"
+        base_url = "{groq_url}"
+        auth = {{ kind = "bearer", env = "GROQ_API_KEY" }}
+        models = [{{ id = "qwen-coder", upstream = "qwen-coder", max_ctx = 128000 }}]
+
+        [[provider]]
+        id = "gemini"
+        base_url = "{gemini_url}"
+        auth = {{ kind = "bearer", env = "GEMINI_API_KEY" }}
+        models = [{{ id = "gemini-flash", upstream = "gemini-flash", max_ctx = 1000000 }}]
+
+        [[class]]
+        id = "kax/classe-a"
+        max_packet_tokens = 60000
+        route = [{{ provider = "groq", model = "qwen-coder" }}]
+
+        [[class]]
+        id = "kax/classe-b"
+        max_packet_tokens = 60000
+        route = [{{ provider = "gemini", model = "gemini-flash" }}]
+        "#,
+        groq_url = groq.uri(),
+        gemini_url = gemini.uri(),
+    );
+
+    let gw = Gateway::spawn(&cfg, SECRETS).await;
+
+    let r = post(
+        &gw,
+        "/v1/messages",
+        CLIENT_HEADERS,
+        req_body("claude-haiku-4-5", true, "oi")
+            .to_string()
+            .into_bytes(),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{r:?}");
+    assert_eq!(r.provider.as_deref(), Some("groq"));
+    let ev = r.events();
+    assert_eq!(text_of(&ev), "via-classe-A");
+}

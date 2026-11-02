@@ -23,8 +23,13 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub struct Config {
     #[serde(default)]
     pub defaults: Defaults,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub aliases: BTreeMap<String, String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_aliases",
+        serialize_with = "serialize_aliases"
+    )]
+    pub aliases: Vec<(String, String)>,
     #[serde(default, rename = "provider")]
     pub providers: Vec<Provider>,
     #[serde(default, rename = "class")]
@@ -760,6 +765,46 @@ fn is_true(b: &bool) -> bool {
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+fn deserialize_aliases<'de, D>(deserializer: D) -> Result<Vec<(String, String)>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct AliasesVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for AliasesVisitor {
+        type Value = Vec<(String, String)>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a map of pattern to class name")
+        }
+
+        fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+        where
+            M: serde::de::MapAccess<'de>,
+        {
+            let mut entries = Vec::new();
+            while let Some((k, v)) = access.next_entry()? {
+                entries.push((k, v));
+            }
+            Ok(entries)
+        }
+    }
+
+    deserializer.deserialize_map(AliasesVisitor)
+}
+
+fn serialize_aliases<S>(aliases: &[(String, String)], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    use serde::ser::SerializeMap;
+    let mut map = serializer.serialize_map(Some(aliases.len()))?;
+    for (k, v) in aliases {
+        map.serialize_entry(k, v)?;
+    }
+    map.end()
 }
 
 #[cfg(test)]
