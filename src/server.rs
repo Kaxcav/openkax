@@ -199,7 +199,10 @@ impl AppState {
     pub fn packet_limits(&self, class: &str) -> Option<(u32, f64)> {
         let v = self.view();
         let c = v.config().class(class)?;
-        Some((c.max_packet_tokens, v.config().defaults.estimate_chars_per_token))
+        Some((
+            c.max_packet_tokens,
+            v.config().defaults.estimate_chars_per_token,
+        ))
     }
 
     /// Troca a config a quente (F0-10). Buckets, cooldowns e chars/token passam

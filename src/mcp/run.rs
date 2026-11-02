@@ -177,13 +177,11 @@ async fn one_attempt(
     let (max_packet, cpt) = app
         .packet_limits(&packet.class)
         .ok_or_else(|| Failure::Stop(format!("classe desconhecida: {}", packet.class)))?;
-    let mut request = build_request(packet, wt, max_packet, cpt)
-        .map_err(|e| Failure::Stop(e.to_string()))?;
+    let mut request =
+        build_request(packet, wt, max_packet, cpt).map_err(|e| Failure::Stop(e.to_string()))?;
     if let Some(prev) = feedback
-        && let Some(MessageContent::Text(body)) = request
-            .messages
-            .last_mut()
-            .and_then(|m| m.content.as_mut())
+        && let Some(MessageContent::Text(body)) =
+            request.messages.last_mut().and_then(|m| m.content.as_mut())
     {
         body.push_str(&format!(
             "\n# Tentativa anterior falhou\nA saída anterior foi recusada com:\n```\n{prev}\n```\nCorrija e devolva o resultado completo no mesmo formato.\n"
@@ -257,10 +255,12 @@ async fn read_reply(response: axum::response::Response) -> Result<Reply, Failure
         .map_err(|e| Failure::Stop(format!("gateway: corpo ilegível: {e}")))?;
     if status != StatusCode::OK {
         let text = String::from_utf8_lossy(&bytes);
-        return Err(Failure::Stop(format!(
-            "gateway: nenhum operário respondeu (status {})",
-            status.as_u16()
-        ) + &format!(": {}", text.chars().take(300).collect::<String>())));
+        return Err(Failure::Stop(
+            format!(
+                "gateway: nenhum operário respondeu (status {})",
+                status.as_u16()
+            ) + &format!(": {}", text.chars().take(300).collect::<String>()),
+        ));
     }
     let v: Value = serde_json::from_slice(&bytes)
         .map_err(|e| Failure::Stop(format!("gateway: resposta inválida: {e}")))?;
