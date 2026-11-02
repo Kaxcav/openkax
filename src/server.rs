@@ -167,6 +167,10 @@ impl View {
         &self.hub.ledger
     }
 
+    fn http_client(&self) -> &reqwest::Client {
+        self.live.client.http()
+    }
+
     fn api_key(&self, provider_idx: usize) -> Option<&str> {
         match &self.live.config.providers[provider_idx].auth {
             Auth::Bearer { env } => self.live.secrets.get(env),
@@ -467,6 +471,7 @@ impl Meta {
             reasoning: self.reasoning,
             pinned: self.pinned,
             outcome,
+            status: None,
         }));
     }
 }

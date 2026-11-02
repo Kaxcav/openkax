@@ -1232,7 +1232,6 @@ fn header_of(req: &Request, name: &str) -> Option<String> {
 }
 
 #[tokio::test]
-#[ignore = "F1-6"]
 async fn passthrough_keeps_body_and_headers_identical() {
     let anth = MockServer::start().await;
     Mock::given(method("POST"))
@@ -1298,7 +1297,6 @@ async fn passthrough_keeps_body_and_headers_identical() {
 }
 
 #[tokio::test]
-#[ignore = "F1-6"]
 async fn passthrough_returns_response_headers_and_errors_untouched() {
     let anth = MockServer::start().await;
     let err = r#"{"type":"error","error":{"type":"rate_limit_error","message":"cheio"},"request_id":"req_9"}"#;
@@ -1335,7 +1333,6 @@ async fn passthrough_returns_response_headers_and_errors_untouched() {
 
 /// O stream passa enquanto chega: nada de `.bytes().await` no meio.
 #[tokio::test]
-#[ignore = "F1-6"]
 async fn passthrough_stream_is_delivered_live() {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let up = live_upstream(
@@ -1364,7 +1361,6 @@ async fn passthrough_stream_is_delivered_live() {
 
 /// Claude Code conta tokens em `claude-*` também: vai para a Anthropic.
 #[tokio::test]
-#[ignore = "F1-6"]
 async fn passthrough_count_tokens() {
     let anth = MockServer::start().await;
     Mock::given(method("POST"))
@@ -1395,7 +1391,6 @@ async fn passthrough_count_tokens() {
 
 /// Ledger só com metadados: nem corpo nem auth, na ida ou na volta.
 #[tokio::test]
-#[ignore = "F1-6"]
 async fn passthrough_ledger_has_metadata_only() {
     let anth = MockServer::start().await;
     let dir = tempdir("ledger-pass");
@@ -1436,7 +1431,6 @@ async fn passthrough_ledger_has_metadata_only() {
 
 /// Erro da Anthropic aparece no ledger com o status, sem passar por sucesso.
 #[tokio::test]
-#[ignore = "F1-6"]
 async fn passthrough_ledger_records_upstream_errors() {
     let anth = MockServer::start().await;
     let dir = tempdir("ledger-pass-429");
@@ -1463,7 +1457,6 @@ async fn passthrough_ledger_records_upstream_errors() {
 
 /// Anthropic fora do ar: erro no formato dela, sem tentar outro provider.
 #[tokio::test]
-#[ignore = "F1-6"]
 async fn passthrough_unreachable_upstream_is_an_anthropic_error() {
     let gw = Gateway::spawn(&passthrough_config("http://127.0.0.1:9", ""), SECRETS).await;
 

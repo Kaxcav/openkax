@@ -54,14 +54,160 @@ pub(super) fn upstream_message(body: &str) -> String {
     message.unwrap_or(body).to_owned()
 }
 
+#[derive(serde::Deserialize)]
+struct ModelOnly {
+    model: String,
+}
+
+fn is_hop_by_hop(name: &axum::http::HeaderName) -> bool {
+    let s = name.as_str();
+    s.eq_ignore_ascii_case("connection")
+        || s.eq_ignore_ascii_case("keep-alive")
+        || s.eq_ignore_ascii_case("proxy-authenticate")
+        || s.eq_ignore_ascii_case("proxy-authorization")
+        || s.eq_ignore_ascii_case("te")
+        || s.eq_ignore_ascii_case("trailer")
+        || s.eq_ignore_ascii_case("transfer-encoding")
+        || s.eq_ignore_ascii_case("upgrade")
+        || s.eq_ignore_ascii_case("host")
+        || s.eq_ignore_ascii_case("content-length")
+}
+
+async fn passthrough(
+    app: AppState,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
+    body: Bytes,
+    model: &str,
+) -> Response {
+    let started = Instant::now();
+    let st = app.view();
+    let provider = st
+        .config()
+        .providers
+        .iter()
+        .find(|p| p.native == Some(crate::config::Native::Anthropic));
+
+    let Some(p) = provider else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "nenhum provider nativo Anthropic configurado",
+        );
+    };
+
+    let base = p.base_url.trim_end_matches('/');
+    let path = uri.path();
+    let url = match uri.query() {
+        Some(q) if !q.is_empty() => format!("{base}{path}?{q}"),
+        _ => format!("{base}{path}"),
+    };
+
+    let client = st.http_client();
+    let mut req_builder = client.post(&url);
+
+    for (name, value) in &headers {
+        if !is_hop_by_hop(name) {
+            req_builder = req_builder.header(name.clone(), value.clone());
+        }
+    }
+
+    req_builder = req_builder.body(body);
+
+    let res = req_builder.send().await;
+
+    match res {
+        Ok(upstream_resp) => {
+            let status = upstream_resp.status();
+            let latency_ms = started.elapsed().as_millis() as u64;
+
+            st.ledger().record(crate::ledger::LedgerEntry::Request(
+                crate::ledger::RequestRecord {
+                    ts: crate::ledger::rfc3339(SystemTime::now()),
+                    route: model.to_string(),
+                    provider: Some(p.id.clone()),
+                    model: Some(model.to_string()),
+                    est_in: 0,
+                    input_tokens: None,
+                    output_tokens: None,
+                    latency_ms,
+                    ttft_ms: None,
+                    fallbacks: 0,
+                    tier: None,
+                    reasoning: false,
+                    pinned: false,
+                    outcome: if status.is_success() {
+                        crate::ledger::Outcome::Ok
+                    } else {
+                        crate::ledger::Outcome::RequestFault
+                    },
+                    status: Some(status.as_u16()),
+                },
+            ));
+
+            let mut resp_headers = HeaderMap::new();
+            for (name, val) in upstream_resp.headers() {
+                if !is_hop_by_hop(name) {
+                    resp_headers.insert(name.clone(), val.clone());
+                }
+            }
+            if let Ok(pv) = HeaderValue::from_str(&p.id) {
+                resp_headers.insert(axum::http::HeaderName::from_static(PROVIDER_HEADER), pv);
+            }
+
+            let mut response = Response::new(Body::from_stream(upstream_resp.bytes_stream()));
+            *response.status_mut() =
+                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK);
+            *response.headers_mut() = resp_headers;
+            response
+        }
+        Err(e) => {
+            let latency_ms = started.elapsed().as_millis() as u64;
+            st.ledger().record(crate::ledger::LedgerEntry::Request(
+                crate::ledger::RequestRecord {
+                    ts: crate::ledger::rfc3339(SystemTime::now()),
+                    route: model.to_string(),
+                    provider: Some(p.id.clone()),
+                    model: Some(model.to_string()),
+                    est_in: 0,
+                    input_tokens: None,
+                    output_tokens: None,
+                    latency_ms,
+                    ttft_ms: None,
+                    fallbacks: 0,
+                    tier: None,
+                    reasoning: false,
+                    pinned: false,
+                    outcome: crate::ledger::Outcome::RequestFault,
+                    status: Some(StatusCode::BAD_GATEWAY.as_u16()),
+                },
+            ));
+            error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("upstream inacessível: {e}"),
+            )
+        }
+    }
+}
+
 pub(super) async fn count_tokens(
     State(app): State<AppState>,
+    uri: axum::http::Uri,
+    headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let body = match body {
         Ok(b) => b,
         Err(e) => return error_response(e.status(), &e.body_text()),
     };
+    let model_only: ModelOnly = match serde_json::from_slice(&body) {
+        Ok(m) => m,
+        Err(e) => {
+            return error_response(StatusCode::BAD_REQUEST, &format!("corpo inválido: {e}"));
+        }
+    };
+    if !model_only.model.starts_with("kax/") {
+        return passthrough(app, uri, headers, body, &model_only.model).await;
+    }
     let req: MessagesRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
@@ -86,15 +232,25 @@ pub(super) async fn count_tokens(
 
 pub(super) async fn messages(
     State(app): State<AppState>,
+    uri: axum::http::Uri,
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let st = app.view();
-    let started = Instant::now();
     let body = match body {
         Ok(b) => b,
         Err(e) => return error_response(e.status(), &e.body_text()),
     };
+    let model_only: ModelOnly = match serde_json::from_slice(&body) {
+        Ok(m) => m,
+        Err(e) => {
+            return error_response(StatusCode::BAD_REQUEST, &format!("corpo inválido: {e}"));
+        }
+    };
+    if !model_only.model.starts_with("kax/") {
+        return passthrough(app, uri, headers, body, &model_only.model).await;
+    }
+    let st = app.view();
+    let started = Instant::now();
     let req: MessagesRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
@@ -109,13 +265,6 @@ pub(super) async fn messages(
         pinned: false,
         reasoning: false,
     };
-    if !req.model.starts_with("kax/") {
-        meta.record(&st, None, None, None, Outcome::Rejected);
-        return error_response(
-            StatusCode::NOT_FOUND,
-            "esta rota aceita apenas classes kax/* (veja /v1/models)",
-        );
-    }
     let translated = to_openai_request(&req);
     if let Some(problem) = invalid(&req, &translated) {
         meta.record(&st, None, None, None, Outcome::Rejected);
