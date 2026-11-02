@@ -33,3 +33,5 @@ Entradas mais recentes no fim. Formato e regras em `RUNBOOK.md`.
 - para a F1-4: tradução sem nenhuma mensagem além de `system` responde 400 local (nota no `tasks.json`).
 - descartado: mais de 4 `stop_sequences` em provider com limite. É raro, e cortar calado mudaria o comportamento pedido; o upstream responde o erro.
 - CI: o `080ab81` falhou no clippy porque o CI usa o stable corrente (1.99.1) e a nuvem está no 1.97, onde o lint `chunks_exact_to_as_chunks` não existe. Corrigido no `bcaf966`, CI verde em Linux e Windows (run 41520117016). **Clippy local verde não garante o do CI: confira o CI antes de dar a tarefa por encerrada.**
+
+## 2026-11-02 18:11 — F1-3 stream — EM ANDAMENTO
