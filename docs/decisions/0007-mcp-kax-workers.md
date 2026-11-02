@@ -56,7 +56,10 @@ respondem `not_implemented`. Execução entra em F2-2 em diante.
 - **Parser:** aceita diff em bloco ```` ```diff ````, `diff --git` ou diff cru; ou
   arquivos completos em `=== FILE: <path> === … === END FILE ===`. Recusa a
   resposta inteira se qualquer path for absoluto, tiver `..` ou não estiver na
-  lista `write` (`out_of_scope`). Barras invertidas são normalizadas antes.
+  lista `write` (`out_of_scope`). Barras invertidas são normalizadas antes. O
+  diff é lido como o `git apply` o lê (máquina de estados, hunks contados pelo
+  `@@`) e cabeçalhos que renomeiam, copiam ou mudam modo são recusados; ver
+  "Modelo de ameaça".
 
 ## Execução e retry (F2-5)
 
@@ -77,13 +80,85 @@ respondem `not_implemented`. Execução entra em F2-2 em diante.
   desconhecido → erro `not_found`. `report(period)` (day|week|month) agrega as
   linhas `kind:"task"` do ledger por classe e por provider.
 
+## Modelo de ameaça
+
+Acrescentado em 2026-11-02, depois da revisão do PR #3 (achados C1 e C2).
+
+**Não confiável:** a resposta do operário (modelo free de terceiros) e tudo o que
+sai dela: o diff, os arquivos e o código que o verify compila e executa (build
+scripts, macros, testes). O verify **executa código não confiável** com os
+privilégios do usuário, **com rede** e com **leitura e escrita do disco** dele.
+O worktree isola o diff, não esse código.
+
+**C1 — chaves de API no ambiente (corrigido, F2-8).** O `main` carrega o `.env`
+no ambiente do processo. Agora os comandos de verify, o `git apply` e todo `git`
+do `worktree.rs` rodam com `env_clear()` e herdam só a allowlist fixa
+`ENV_ALLOWLIST` (`src/verify.rs`): `PATH`, `HOME`, `USERPROFILE`, `CARGO_HOME`,
+`RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`, `TEMP`, `TMP`, `TMPDIR`, `SystemRoot`,
+`SystemDrive`, `windir`, `ComSpec`, `PATHEXT`, `LANG`, `LC_ALL`, `APPDATA`,
+`LOCALAPPDATA`, `PROGRAMDATA`, `NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE`,
+`RUST_BACKTRACE`, `GIT_EXEC_PATH`. O `git` do worktree entra porque hooks e
+config do worktree podem ter sido plantados pelo código do verify. Para o que
+um verify precisar a mais, `.kax/verify.toml` aceita `env_passthrough = [...]`
+(só para os comandos de verify, nunca para o `git`). Nome terminado em `_KEY`,
+`_TOKEN` ou `_SECRET`, ou igual (sem diferenciar caixa) a um `auth.env` ou
+`${VAR}` do `providers.toml` (`OPENKAX_CONFIG`), é erro de config e a tarefa vai
+para `needs_lead`. `cargo build` com link MSVC foi conferido no Windows só com a
+allowlist.
+
+**C2 — diff fora da lista `write` (corrigido, F2-9).** Duas camadas:
+
+1. *Parser* (`src/mcp/packet.rs`): máquina de estados com a gramática do
+   `git apply`. Entre `diff --git` e o primeiro `---`/`@@` só passam `index`
+   (modo opcional 100644/100755) e `new file mode`/`deleted file mode` 100644 ou
+   100755. `rename*`, `copy*`, `similarity`, `dissimilarity`, `old mode`,
+   `new mode`, modos 120000/160000, `GIT binary patch` e `Binary files` são
+   recusados. `diff --git` exige `a/<p> b/<p>` com o mesmo path; `---`/`+++`
+   exigem o prefixo `a/` ou `b/` (o `-p1` cortaria o 1º diretório) e o mesmo
+   path do bloco. O fim do hunk vem da contagem do `@@`: `--- `/`+++ ` dentro
+   de hunk é conteúdo.
+2. *Guarda pós-apply* (`verify::check_staged`), a que vale: `git diff --cached
+   --no-renames --raw -z <base>` no worktree, com o ambiente limpo, contra o
+   commit base da tarefa. Todo path tem de estar na lista `write` e todo modo
+   novo tem de ser 100644, 100755 ou 000000 (deleção). Roda depois do apply (ou
+   da escrita dos arquivos completos) e **de novo antes do commit**, para pegar
+   o que o próprio verify criou ou commitou. Fora do escopo → `worktree::reset`
+   e retry no próximo candidato; se for depois do verify → `needs_lead`.
+
+No modo `full_file`, `write_files` recusa escrever se o path ou um diretório pai
+dentro do worktree for symlink (link vindo do `base_ref`).
+
+**O que continua aberto.** O `env_clear` fecha só o vazamento das chaves pelo
+ambiente. Até existir sandbox, o código do verify ainda pode:
+
+- ler qualquer arquivo do usuário: o próprio `.env` (em geral na raiz do repo,
+  dois níveis acima de `.kax/wt/<id>`), o `~/.claude.json` (onde
+  `claude mcp add -e` grava variáveis), `~/.ssh`, credenciais de CLIs;
+- usar a rede para mandar isso para fora;
+- escrever fora do worktree (repo principal, `.git/hooks`, `.git/config`, outras
+  branches) e deixar processo rodando em segundo plano;
+- commitar no worktree: a guarda antes do commit compara contra o commit base e
+  manda a tarefa para `needs_lead`, mas não reescreve o histórico que o verify
+  criou na branch `kax/<id>`.
+
+**Decisão adiada para a Fase 5: sandbox do verify.** Linux: `bwrap` ou
+`unshare -n` (sem rede, só o worktree e o toolchain montados, home vazio).
+Windows: Job Object (mata a árvore ao fechar, limites de CPU/memória) + token
+restrito ou AppContainer (sem rede, sem acesso ao perfil do usuário).
+
+**Até lá:** rodar o `openkax mcp` sem segredos além do necessário. Só as chaves
+dos providers que atendem as classes `kax/*` dos operários, de preferência
+dedicadas, free e revogáveis; nada de outras credenciais no `.env` que o MCP
+carrega nem em arquivo dentro do repo delegado. O lead revisa o diff de
+`kax/<id>` contra o base antes de integrar.
+
 ## Consequências
 
 - O lead ganha paralelismo barato, mas toda saída passa por verify antes de
   chegar a ele; custo extra: um worktree e uma rodada de build por tarefa.
-- Segurança depende do isolamento no worktree e de paths relativos sem `..`
-  (validados já no contrato); comandos de `verify.toml` são do repo do
-  usuário e rodam com os privilégios dele.
+- Segurança: ver "Modelo de ameaça". O worktree e as duas camadas do C2 limitam
+  o que o diff do operário altera; o código que o verify executa roda com os
+  privilégios do usuário, sem as chaves no ambiente, até o sandbox da Fase 5.
 - Tarefas de arquitetura, auth/cripto e specs ambíguas continuam com o lead
   (política do CLAUDE.md).
 - Estado dos lotes só em memória: reiniciar `openkax mcp` perde `status(batch_id)`.
@@ -93,9 +168,9 @@ respondem `not_implemented`. Execução entra em F2-2 em diante.
 
 - **Status `rejected` não é produzido.** Qualquer recusa (parse, `git apply`, verify,
   esgotar tentativas) vira `needs_lead`; o valor segue no schema por compatibilidade.
-- **`verify.toml` fornece só `timeout_s` e `max_log_bytes`.** Os comandos rodados são
-  sempre os de `accept.verify` do pacote; a seleção por glob (`[[language]]`) é
-  validada no parse mas **ainda não** ligada ao runner.
+- **`verify.toml` fornece só `timeout_s`, `max_log_bytes` e `env_passthrough`.** Os
+  comandos rodados são sempre os de `accept.verify` do pacote; a seleção por glob
+  (`[[language]]`) é validada no parse mas **ainda não** ligada ao runner.
 - **`delegate_batch`:** padrão de `parallelism` 4, máximo 16 (o contrato inicial dizia 8/32);
   devolve o lote em `queued` e roda em background.
 - **Falhas de infra** (worktree, gateway sem candidato, pacote grande) → `needs_lead`.
