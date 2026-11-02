@@ -42,7 +42,7 @@ A [doc do Gemini](https://ai.google.dev/gemini-api/docs/generate-content/thought
 - Chamada que chega ao fim sem `name` some, e não conta para `tool_use`: o cliente não teria o que executar. Pelo mesmo motivo, `finish_reason: "tool_calls"` sem nenhuma tool emitida vira `end_turn`.
 - `usage` zerado vale como não informado: é upstream que não contou, não resposta de custo zero.
 - Morte pós-1º-token, ou `finish_reason: "error"`: evento `error` (`api_error`) e fim. Não há `message_stop` depois dele.
-- A resposta não-stream é a dobra dos mesmos eventos (`collect_response`), então os dois modos não divergem. Argumentos de tool que não são objeto JSON (truncados, `null`, lista) viram `input: {}`, com o `stop_reason` contando o motivo.
+- A resposta não-stream é a dobra dos mesmos eventos (`collect_response`), então os dois modos não divergem. Argumentos de tool que não são objeto JSON (truncados, `null`, lista) viram `input: {}`, com o `stop_reason` contando o motivo. No stream, `null`, lista ou número nem saem como delta, e `arguments` que vem como objeto vira a string dele.
 
 ### Erros HTTP
 `{"type":"error","error":{"type","message"}}`: 400 `invalid_request_error`, 404 `not_found_error`, 413 `request_too_large`, 409 `invalid_request_error` (pin em modelo desabilitado), 429 `rate_limit_error` com `retry-after`, 502 `api_error`, 503 `overloaded_error`. Vale também para os erros de `x-openkax-*`.

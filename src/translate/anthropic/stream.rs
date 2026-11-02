@@ -4,6 +4,7 @@
 //! frente é o único que pode estar aberto no cliente; o resto fica retido, porque
 //! o protocolo só admite um bloco aberto por vez e o upstream intercala à vontade.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 
 use serde_json::{Map, Value};
@@ -40,6 +41,26 @@ struct ToolHead {
     id: String,
     name: String,
     signature: Option<String>,
+    args_started: bool,
+    args_rejected: bool,
+}
+
+impl ToolHead {
+    /// O que dos argumentos pode sair. `input` é sempre objeto: `null`, lista ou
+    /// número nem viram delta, e o stream fica igual à resposta não-stream. Espaço
+    /// antes do `{` também não sai, ou um `arguments: " "` viraria JSON inválido.
+    fn admit_args<'a>(&mut self, args: &'a str) -> &'a str {
+        let args = if self.args_started {
+            args
+        } else {
+            args.trim_start()
+        };
+        if !self.args_started && !args.is_empty() {
+            self.args_started = true;
+            self.args_rejected = !args.starts_with('{');
+        }
+        if self.args_rejected { "" } else { args }
+    }
 }
 
 #[derive(Debug)]
@@ -239,6 +260,13 @@ impl OpenAiToAnthropicStream {
         let found = self.segments.iter().position(
             |s| matches!(&s.kind, SegmentKind::Tool(h) if h.upstream_index == upstream_index),
         );
+        let args = tool_args(delta);
+        let name = delta["function"]["name"].as_str().unwrap_or("");
+        let id = delta["id"].as_str().unwrap_or("");
+        // Delta vazio não anuncia chamada nenhuma: não fecha o texto aberto.
+        if found.is_none() && id.is_empty() && name.is_empty() && args.is_empty() {
+            return;
+        }
         let position = found.unwrap_or_else(|| {
             self.segments
                 .push_back(Segment::new(SegmentKind::Tool(ToolHead {
@@ -247,6 +275,8 @@ impl OpenAiToAnthropicStream {
                     id: String::new(),
                     name: String::new(),
                     signature: None,
+                    args_started: false,
+                    args_rejected: false,
                 })));
             self.next_tool += 1;
             self.segments.len() - 1
@@ -254,17 +284,15 @@ impl OpenAiToAnthropicStream {
         let segment = &mut self.segments[position];
         if let SegmentKind::Tool(head) = &mut segment.kind {
             // Há upstream que repete `id` e `name` em todo chunk: vale o 1º.
-            set_if_empty(&mut head.id, delta["id"].as_str());
-            set_if_empty(&mut head.name, delta["function"]["name"].as_str());
+            set_if_empty(&mut head.id, id);
+            set_if_empty(&mut head.name, name);
             let signature = delta["extra_content"]["google"]["thought_signature"].as_str();
             if head.signature.is_none() {
                 head.signature = signature.filter(|s| !s.is_empty()).map(str::to_owned);
             }
+            segment.pending.push_str(head.admit_args(&args));
         }
-        if let Some(args) = delta["function"]["arguments"].as_str() {
-            segment.pending.push_str(args);
-            self.output_chars += args.chars().count();
-        }
+        self.output_chars += args.chars().count();
     }
 
     /// Solta o que a fila permite. Com `finishing`, fecha tudo: `id` ausente é
@@ -342,11 +370,19 @@ impl OpenAiToAnthropicStream {
     }
 }
 
-fn set_if_empty(field: &mut String, value: Option<&str>) {
-    if field.is_empty()
-        && let Some(value) = value
-    {
+fn set_if_empty(field: &mut String, value: &str) {
+    if field.is_empty() {
         value.clone_into(field);
+    }
+}
+
+/// `arguments` do delta. Há upstream que manda objeto em vez de string; perder os
+/// argumentos executaria a tool com `{}`.
+fn tool_args(delta: &Value) -> Cow<'_, str> {
+    match &delta["function"]["arguments"] {
+        Value::String(args) => Cow::Borrowed(args),
+        object @ Value::Object(_) => Cow::Owned(object.to_string()),
+        _ => Cow::Borrowed(""),
     }
 }
 

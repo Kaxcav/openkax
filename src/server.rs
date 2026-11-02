@@ -711,38 +711,73 @@ fn output_chars(chunk: &ChatCompletionChunk) -> usize {
 }
 
 /// Dá a cada chamada paralela o seu índice. Há upstream que omite `index` ou
-/// repete o mesmo em chamadas diferentes; o `id` novo é o que marca a chamada.
+/// repete o mesmo em chamadas diferentes; o `id` novo é o que marca a chamada. Sem
+/// `id` nenhum, marca a chamada o nome novo, ou o nome com argumentos depois de um
+/// JSON já completo; nome repetido em chunk de continuação não conta.
 #[derive(Default)]
 struct ToolIndexer {
-    /// `(index do upstream, id)` por índice devolvido ao cliente.
-    slots: Vec<(Option<u64>, String)>,
+    /// Por índice devolvido ao cliente.
+    slots: Vec<ToolSlot>,
+}
+
+#[derive(Default)]
+struct ToolSlot {
+    upstream_index: Option<u64>,
+    id: String,
+    name: String,
+    args: String,
+}
+
+impl ToolSlot {
+    fn starts_new_call(&self, name: &str, args: &str) -> bool {
+        !name.is_empty()
+            && !self.name.is_empty()
+            && (name != self.name
+                || (!args.is_empty()
+                    && serde_json::from_str::<serde::de::IgnoredAny>(&self.args).is_ok()))
+    }
 }
 
 impl ToolIndexer {
     fn normalize(&mut self, delta: &mut Value) {
         let up = delta["index"].as_u64();
         let id = delta["id"].as_str().unwrap_or("").to_owned();
-        let by_index = up.and_then(|u| self.slots.iter().rposition(|s| s.0 == Some(u)));
+        let name = delta["function"]["name"].as_str().unwrap_or("").to_owned();
+        let args = delta["function"]["arguments"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        let by_index =
+            up.and_then(|u| self.slots.iter().rposition(|s| s.upstream_index == Some(u)));
         let found = if id.is_empty() {
             // Continuação: a chamada daquele índice ou, sem índice, a última.
-            if up.is_some() {
+            let target = if up.is_some() {
                 by_index
             } else {
                 self.slots.len().checked_sub(1)
-            }
+            };
+            target.filter(|&i| !self.slots[i].starts_new_call(&name, &args))
         } else {
             self.slots
                 .iter()
-                .position(|s| s.1 == id)
-                .or(by_index.filter(|&i| self.slots[i].1.is_empty()))
+                .position(|s| s.id == id)
+                .or(by_index.filter(|&i| self.slots[i].id.is_empty()))
         };
         let slot = found.unwrap_or_else(|| {
-            self.slots.push((up, String::new()));
+            self.slots.push(ToolSlot {
+                upstream_index: up,
+                ..ToolSlot::default()
+            });
             self.slots.len() - 1
         });
+        let entry = &mut self.slots[slot];
         if !id.is_empty() {
-            self.slots[slot].1 = id;
+            entry.id = id;
         }
+        if entry.name.is_empty() {
+            entry.name = name;
+        }
+        entry.args.push_str(&args);
         if let Some(o) = delta.as_object_mut() {
             o.insert("index".into(), slot.into());
         }
@@ -1101,6 +1136,35 @@ mod tests {
             json!({ "id": "c2" }),
         ];
         assert_eq!(indexes(&missing), [json!(0), json!(0), json!(1)]);
+    }
+
+    /// Sem `id`, com `index` repetido ou ausente: duas chamadas não viram uma com
+    /// `{"p":1}{"q":2}`.
+    #[test]
+    fn tool_indexer_splits_parallel_calls_without_any_id() {
+        let call = |index: Value, name: &str, args: &str| json!({ "index": index, "id": "", "function": { "name": name, "arguments": args } });
+        for index in [json!(0), Value::Null] {
+            let got = indexes(&[
+                call(index.clone(), "Read", "{\"p\":1}"),
+                call(index.clone(), "Grep", "{\"q\":2}"),
+                call(index.clone(), "Grep", "{\"q\":3}"),
+            ]);
+            assert_eq!(got, [json!(0), json!(1), json!(2)], "index {index}");
+        }
+    }
+
+    /// Nome repetido em chunk de continuação é a mesma chamada, mesmo com o JSON
+    /// completo seguido de chunk sem argumentos.
+    #[test]
+    fn tool_indexer_keeps_repeated_name_as_continuation() {
+        let call = |name: &str, args: &str| json!({ "index": 0, "function": { "name": name, "arguments": args } });
+        let got = indexes(&[
+            call("Read", "{\"p\""),
+            call("Read", ":1}"),
+            call("Read", ""),
+            call("", ""),
+        ]);
+        assert_eq!(got, [json!(0), json!(0), json!(0), json!(0)]);
     }
 
     #[test]

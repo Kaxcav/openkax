@@ -1710,3 +1710,180 @@ fn collect_rejects_an_incomplete_stream() {
     let partial = t.push(&text_chunk("a"));
     assert!(collect_response(&partial).is_err());
 }
+
+/// Há upstream que repete `id` e `name` em todo chunk: não duplica nem troca.
+#[test]
+fn repeated_id_and_name_keep_the_first() {
+    let events = run(
+        &[
+            tool_chunk(
+                json!([{ "index": 0, "id": "c1", "function": { "name": "Read", "arguments": "{" } }]),
+            ),
+            tool_chunk(
+                json!([{ "index": 0, "id": "outro", "function": { "name": "Grep", "arguments": "}" } }]),
+            ),
+            finish_chunk("tool_calls"),
+        ],
+        None,
+    );
+    assert_well_formed(&events);
+    assert_eq!(
+        collect_response(&events).unwrap().content,
+        vec![ContentBlock::ToolUse {
+            id: "c1".into(),
+            name: "Read".into(),
+            input: json!({})
+        }]
+    );
+}
+
+#[test]
+fn first_non_empty_signature_wins() {
+    let events = run(
+        &[
+            tool_chunk(
+                json!([{ "index": 0, "extra_content": { "google": { "thought_signature": "" } }, "function": { "name": "Ls" } }]),
+            ),
+            tool_chunk(
+                json!([{ "index": 0, "extra_content": { "google": { "thought_signature": "A" } } }]),
+            ),
+            tool_chunk(
+                json!([{ "index": 0, "extra_content": { "google": { "thought_signature": "B" } } }]),
+            ),
+            tool_chunk(json!([{ "index": 0, "id": "c1" }])),
+        ],
+        None,
+    );
+    assert!(matches!(
+        &collect_response(&events).unwrap().content[..],
+        [ContentBlock::ToolUse { id, .. }] if id == &encode_tool_use_id("c1", Some("A"))
+    ));
+}
+
+/// O que veio junto do `finish_reason: "error"` ainda sai antes do evento `error`.
+#[test]
+fn error_finish_in_the_same_chunk_keeps_the_text() {
+    let mut t = OpenAiToAnthropicStream::new(meta());
+    let chunk = delta_chunk(
+        0,
+        Delta {
+            content: Some("oi".into()),
+            ..Delta::default()
+        },
+        Some("error"),
+    );
+    assert_eq!(
+        names(&t.push(&chunk)),
+        [
+            "message_start",
+            "content_block_start",
+            "content_block_delta",
+            "error"
+        ]
+    );
+}
+
+/// A estimativa conta caracteres, como o scheduler, não bytes.
+#[test]
+fn output_estimate_counts_chars_and_survives_bad_chars_per_token() {
+    let output_tokens = |chars_per_token: f64| {
+        let mut t = OpenAiToAnthropicStream::new(StreamMeta {
+            chars_per_token,
+            ..meta()
+        });
+        t.push(&text_chunk("çççç"));
+        t.push(&tool_chunk(
+            json!([{ "index": 0, "id": "c1", "function": { "name": "Ls", "arguments": "{\"ç\":1}" } }]),
+        ));
+        t.finish(None).iter().find_map(|e| match e {
+            StreamEvent::MessageDelta { usage, .. } => Some(usage.output_tokens),
+            _ => None,
+        })
+    };
+    assert_eq!(output_tokens(4.0), Some(3), "11 chars / 4");
+    assert_eq!(output_tokens(0.0), Some(11));
+    assert_eq!(output_tokens(f64::NAN), Some(11));
+}
+
+/// Stream e não-stream iguais: `input` não objeto nem vira delta.
+#[test]
+fn non_object_args_emit_no_delta() {
+    for args in ["null", "[1]", "3", " null"] {
+        let events = run(
+            &[
+                tool_chunk(
+                    json!([{ "index": 0, "id": "c1", "function": { "name": "Ls", "arguments": args } }]),
+                ),
+                tool_chunk(json!([{ "index": 0, "function": { "arguments": "{}" } }])),
+                finish_chunk("tool_calls"),
+            ],
+            None,
+        );
+        assert_eq!(
+            names(&events),
+            [
+                "message_start",
+                "content_block_start",
+                "content_block_stop",
+                "message_delta",
+                "message_stop"
+            ],
+            "{args}"
+        );
+    }
+}
+
+#[test]
+fn whitespace_before_the_object_is_not_sent() {
+    let events = run(
+        &[
+            tool_chunk(
+                json!([{ "index": 0, "id": "c1", "function": { "name": "Ls", "arguments": " " } }]),
+            ),
+            tool_chunk(json!([{ "index": 0, "function": { "arguments": " {\"a\":1}" } }])),
+        ],
+        None,
+    );
+    assert!(events.contains(&StreamEvent::ContentBlockDelta {
+        index: 0,
+        delta: BlockDelta::InputJsonDelta {
+            partial_json: "{\"a\":1}".into()
+        },
+    }));
+}
+
+/// Perder os argumentos executaria a tool com `{}`.
+#[test]
+fn object_arguments_become_their_json_string() {
+    let events = run(
+        &[
+            tool_chunk(
+                json!([{ "index": 0, "id": "c1", "function": { "name": "Read", "arguments": { "p": "/etc" } } }]),
+            ),
+            finish_chunk("tool_calls"),
+        ],
+        None,
+    );
+    assert_eq!(
+        collect_response(&events).unwrap().content,
+        vec![ContentBlock::ToolUse {
+            id: "c1".into(),
+            name: "Read".into(),
+            input: json!({ "p": "/etc" })
+        }]
+    );
+}
+
+/// Delta vazio não anuncia chamada: o texto segue no mesmo bloco, ao vivo.
+#[test]
+fn empty_tool_delta_does_not_close_the_text() {
+    let mut t = OpenAiToAnthropicStream::new(meta());
+    t.push(&text_chunk("a"));
+    assert!(
+        t.push(&tool_chunk(
+            json!([{ "index": 0, "function": { "arguments": "" } }])
+        ))
+        .is_empty()
+    );
+    assert_eq!(names(&t.push(&text_chunk("b"))), ["content_block_delta"]);
+}
