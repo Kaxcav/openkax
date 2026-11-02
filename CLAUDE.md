@@ -16,6 +16,14 @@ Modo B (MCP com pacote enxuto) é o principal. Modo A (rewrite de modelo via `AN
 Não iniciar Fase 1 antes disso. Atualize esta seção ao mudar de fase.
 Progresso (2026-11-02): scheduler/dispatcher/ledger + providers de cauda (ADR 0003/0004); cooldown por tipo de erro (F0-17); timeout de 1º token por modelo (F0-18); Cohere sem raciocínio + `ascii_json` (F0-19); rotas F0-20; Groq/Cloudflare habilitados, 410 e headers IETF (F0-21); hot-reload + snapshot dos buckets (F0-10, ADR 0005); WindowsPlatform + CI ubuntu/windows com artefato `.exe` (F0-11); GitHub Models removido e Vercel desligada/fora das rotas (F0-22); critério de memória privada + pool/blocking enxutos (F0-23, ADR 0002). Testes: 94 unitários + 19 de integração (Windows e Linux). Release Windows local 2,94 MiB; memória privada ociosa após 5 requests 3,82 MiB (working set 14,7 MiB, informativo). PR `fase-0 → main` aberto, **sem merge** até o aceite com Continue/Cline (F0-12, usuário). Ver `tasks.json`.
 
+## Fase 2 — como usar o MCP `kax-workers`
+- Registrar: `claude mcp add kax-workers -- <caminho>\openkax.exe mcp` (stdio; `OPENKAX_CONFIG` aponta o `providers.toml`).
+- Tools: `delegate`, `delegate_batch` (background, `parallelism` 4, máx. 16), `status(batch_id)`, `quota`, `report(day|week|month)`.
+- Cada tarefa roda num worktree `.kax/wt/<id>`; aceita → branch `kax/<id>` para integrar. Recusa/esgotou → `needs_lead` (você faz).
+- Verify: comandos de `accept.verify`; `.kax/verify.toml` ajusta só `timeout_s`/`max_log_bytes` (ver `.kax/verify.toml.example`).
+- Ledger `kind:"task"` em `%LOCALAPPDATA%\OpenKax\ledger`; limpeza: `openkax clean [--repo <path>] [--all]`.
+- Aceite manual: `docs/smoke/fase-2-aceite.md`; decisão: ADR 0007.
+
 ## Ambientes (ver ADR 0001)
 Dois ambientes de dev; descubra em qual está (`uname`/plataforma) antes de propor comandos.
 - **Notebook (WSL2 Ubuntu)**: repo em `~/openkax` (ext4). Comandos **bash em Linux**, nunca PowerShell. Tem WDAC em modo enforce: **nenhum `.exe` não assinado roda no host**; rode o binário Linux dentro do WSL (`127.0.0.1:8000`) — clientes no Windows alcançam via `localhost:8000`.

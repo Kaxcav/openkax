@@ -1,7 +1,7 @@
 # 0007 — MCP `kax-workers`: delegação verificada em worktrees
 
 Data: 2026-11-02
-Status: proposta
+Status: Aceito (2026-11-02; aceite manual do Kaxcav pendente, ver `docs/smoke/fase-2-aceite.md`)
 
 ## Contexto
 
@@ -86,5 +86,18 @@ respondem `not_implemented`. Execução entra em F2-2 em diante.
   usuário e rodam com os privilégios dele.
 - Tarefas de arquitetura, auth/cripto e specs ambíguas continuam com o lead
   (política do CLAUDE.md).
-- Pendente (precisa de decisão do usuário antes de F2-3): onde persistir o
-  estado dos lotes para `status` sobreviver a restart do processo MCP.
+- Estado dos lotes só em memória: reiniciar `openkax mcp` perde `status(batch_id)`.
+  O histórico durável é o ledger (`kind:"task"`) + as branches `kax/<id>`.
+
+## O que mudou durante a implementação
+
+- **Status `rejected` não é produzido.** Qualquer recusa (parse, `git apply`, verify,
+  esgotar tentativas) vira `needs_lead`; o valor segue no schema por compatibilidade.
+- **`verify.toml` fornece só `timeout_s` e `max_log_bytes`.** Os comandos rodados são
+  sempre os de `accept.verify` do pacote; a seleção por glob (`[[language]]`) é
+  validada no parse mas **ainda não** ligada ao runner.
+- **`delegate_batch`:** padrão de `parallelism` 4, máximo 16 (o contrato inicial dizia 8/32);
+  devolve o lote em `queued` e roda em background.
+- **Falhas de infra** (worktree, gateway sem candidato, pacote grande) → `needs_lead`.
+- **Timeout do verify** mata a árvore de processos (`taskkill /T` no Windows, grupo no Unix).
+- **Persistência dos lotes:** decisão adiada; ficou só em memória (32 lotes).

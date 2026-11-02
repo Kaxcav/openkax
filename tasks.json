@@ -188,6 +188,13 @@
       "owner": "lead",
       "status": "done",
       "note": "130 unitários (+2 de report) + 6 mcp_contract (+1 #[ignore] de medição) + 1 mcp_batch (8 tarefas wiremock, parallelism=4, pico<=4 e 8 resultados) + 4 mcp_retry. Padrão de parallelism 4, máximo 16 (era 8/32). Aceite recusado = needs_lead (rejected não é produzido). Memória privada do lote: 1,67 → 2,30 → 2,18 MiB (ADR 0002). Registro de lotes só em memória"
+    },
+    {
+      "id": "F2-7",
+      "title": "Documentação e roteiro de aceite da Fase 2: ADR 0007 aceito, docs/smoke/fase-2-aceite.md, verify.toml.example revisado, seção Fase 2 no CLAUDE.md",
+      "owner": "lead",
+      "status": "done",
+      "note": "Só documentação (sem mudança de código). Aceite manual do Kaxcav (>=7/10 em 1a passada) pendente: needs_user; a secao Fase atual do CLAUDE.md nao foi alterada. Pendencia de decisao: persistencia dos lotes (hoje so em memoria) e ligacao de verify.toml por glob ao runner"
     }
   ]
 }
