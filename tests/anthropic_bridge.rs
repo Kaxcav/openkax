@@ -1767,3 +1767,51 @@ async fn invalid_model_scope_records_rejected_in_ledger() {
     assert_eq!(lines[0]["outcome"], "rejected");
     assert_eq!(anth.received_requests().await.unwrap().len(), 0);
 }
+
+/// Headers repetidos na resposta do upstream são preservados via append (ex: múltiplos set-cookie ou x-teste).
+#[tokio::test]
+async fn passthrough_preserves_duplicate_response_headers() {
+    let anth = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(ODD_STREAM, "text/event-stream")
+                .append_header("set-cookie", "sess=abc; Path=/; HttpOnly")
+                .append_header("set-cookie", "pref=dark; Path=/")
+                .append_header("x-teste", "val-1")
+                .append_header("x-teste", "val-2"),
+        )
+        .expect(1)
+        .mount(&anth)
+        .await;
+    let gw = Gateway::spawn(&passthrough_config(&anth.uri(), ""), SECRETS).await;
+
+    let r = post(
+        &gw,
+        "/v1/messages",
+        CLIENT_HEADERS,
+        ODD_BODY.as_bytes().to_vec(),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{r:?}");
+
+    let cookies: Vec<&str> = r
+        .headers
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .collect();
+    assert_eq!(
+        cookies,
+        vec!["sess=abc; Path=/; HttpOnly", "pref=dark; Path=/"]
+    );
+
+    let testes: Vec<&str> = r
+        .headers
+        .get_all("x-teste")
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .collect();
+    assert_eq!(testes, vec!["val-1", "val-2"]);
+}

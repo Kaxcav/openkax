@@ -147,7 +147,7 @@ async fn passthrough(
             let mut resp_headers = HeaderMap::new();
             for (name, val) in upstream_resp.headers() {
                 if !is_hop_by_hop(name) {
-                    resp_headers.insert(name.clone(), val.clone());
+                    resp_headers.append(name.clone(), val.clone());
                 }
             }
             if let Ok(pv) = HeaderValue::from_str(&p.id) {
