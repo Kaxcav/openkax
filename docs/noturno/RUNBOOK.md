@@ -14,13 +14,18 @@ Você é o lead técnico do OpenKax trabalhando sozinho. Implemente com TDD, ver
 5. Uma tarefa por execução, no máximo ~40 min de trabalho. Commit pequeno, push, log.
 6. `cargo test` e `cargo clippy --all-targets -- -D warnings` verdes antes de qualquer push. Sem `todo!()`, sem stub fora de CONTRACT.
 
-## Portão (checar primeiro)
+## Portão e branch de trabalho (checar primeiro)
+O merge em `main` é exclusivo do Kaxcav (o turno autônomo **nunca** faz merge; a tentativa de 2026-11-02 foi bloqueada pela checagem de segurança e isso é o esperado). Por isso as fases são **empilhadas**:
+
 ```bash
 git fetch origin
-git merge-base --is-ancestor origin/fase-0 origin/main && echo LIBERADO || echo AGUARDANDO
+git ls-remote --heads origin fase-2 fase-1
 ```
-- **AGUARDANDO** (o PR #1 `fase-0 → main` ainda não foi mergeado — depende do aceite Continue/Cline do Kaxcav): **não comece a Fase 1 e não faça commit em lugar nenhum** (commits na `fase-0` poluiriam o PR e disparariam CI à toa). Encerre informando "aguardando merge do PR #1". Não há outra tarefa permitida nesse estado.
-- **LIBERADO**: a branch de trabalho é `fase-2` se ela existir no remoto; senão `fase-1` (crie a partir de `origin/main` se não existir). Faça checkout dela e `git merge --ff-only origin/<branch>`.
+- Se `origin/fase-2` existe → trabalhe nela.
+- Senão, se `origin/fase-1` existe → trabalhe nela.
+- Senão → crie `fase-1` a partir de `origin/fase-0` se o PR #1 ainda não foi mergeado (`git merge-base --is-ancestor origin/fase-0 origin/main` falha), ou a partir de `origin/main` se já foi.
+- Faça checkout da branch escolhida e `git merge --ff-only origin/<branch>`. Se o `main` tiver commits novos que a branch não tem, **não** faça merge do main por conta própria se der conflito: registre no LOG e siga.
+- PRs em draft: `fase-1 → fase-0` enquanto o PR #1 estiver aberto (senão `fase-1 → main`); `fase-2 → fase-1`.
 
 ## Trava contra execuções sobrepostas
 No início, depois do portão, leia a última entrada de `docs/noturno/LOG.md` na branch de trabalho. Se ela diz `EM ANDAMENTO` com início há menos de 75 min, **encerre sem fazer nada**. Senão, adicione uma entrada `EM ANDAMENTO <hora> — <tarefa>`, commit (`chore(noturno): inicia <tarefa>`) e push. Se o push for rejeitado (outra execução pegou), encerre.
@@ -32,7 +37,7 @@ No início, depois do portão, leia a última entrada de `docs/noturno/LOG.md` n
 4. TDD: testes primeiro (devem falhar), implementação, `cargo test`, `cargo clippy -D warnings`.
 5. **Revisão independente:** suba um subagente sem contexto desta conversa, entregue o diff (`git diff origin/fase-1...HEAD`) e o trecho do PLANO/ADR que ele deve honrar, e peça defeitos concretos. Corrija o que for confirmado; registre no LOG o que foi descartado e por quê.
 6. Commit(s) `tipo(escopo): resumo`, push na branch de trabalho.
-7. PR em **draft** (`fase-1 → main`; `fase-2 → fase-1`) (crie se não existir via `gh api repos/Kaxcav/openkax/pulls -f head=fase-1 -f base=main -F draft=true ...`; GraphQL não funciona, use REST). Atualize o checklist do corpo.
+7. PR em **draft** (bases conforme o Portão) (crie se não existir via `gh api repos/Kaxcav/openkax/pulls -f head=fase-1 -f base=main -F draft=true ...`; GraphQL não funciona, use REST). Atualize o checklist do corpo.
 8. Confira o CI do push (`gh api "repos/Kaxcav/openkax/actions/runs?branch=<branch>&per_page=1"`). Se a execução acabar antes do CI, a próxima confere primeiro.
 9. `tasks.json`: status da tarefa, nota com números. `LOG.md`: troque `EM ANDAMENTO` por `FEITO`/`BLOQUEADO` com resumo de 3–6 linhas (o que entrou, testes, CI, pendências).
 
