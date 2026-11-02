@@ -15,3 +15,4 @@ Entradas mais recentes no fim. Formato e regras em `RUNBOOK.md`.
 - revisão independente: lacunas de teste confirmadas por mutação e fechadas (enquadramento SSE, `settle` sem `usage`, morte sem cooldown, tools/tool_calls no tamanho do pacote, rota por classe), defeitos acima corrigidos.
 - descartado por ora, sem efeito no cliente: ledger do 413 com `est_in: 0` e `prompt_tokens_details` fora do `usage` repassado (anteriores a este turno).
 - pendências: `add_repo` e `register_repo_root` não existem nesta sessão; o repo já vinha clonado e com acesso de push.
+- escopo: a branch `Kaxcav/openkax-fase-2` e o `ESTADO_ATUAL` passam F2/F5 para a fábrica, mas o runbook e o prompt agendado ainda mandavam o turno seguir para a F2. Runbook e `tasks.json` alinhados na `fase-1`; o prompt agendado só o Kaxcav pode ajustar. Se ele quiser outra divisão, é só reverter este commit.

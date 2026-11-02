@@ -3,6 +3,10 @@
 > Fonte de verdade para as execuções agendadas que rodam sem o Kaxcav presente. Cada execução é uma sessão **nova, sem memória**: tudo o que ela precisa saber está aqui, no `PLANO_MESTRE.md`, no `CLAUDE.md`, no `tasks.json` e no `docs/noturno/LOG.md`.
 > Criado em 2026-11-02 pelo chat de arquitetura. Janela: execuções de hora em hora até **2026-11-03 08:00 (America/Sao_Paulo)**.
 
+## Escopo atual do turno (2026-11-02 15:35)
+**O turno na nuvem faz F0-24 e F1-1..F1-8, na branch `fase-1`.** F2-* e F5-* são da fábrica (Gemini via esteira) na branch `Kaxcav/openkax-fase-2`, conforme `docs/noturno/FABRICA.md` dessa branch. Onde este runbook mandar seguir para a Fase 2 ou criar `fase-2`, vale este parágrafo: depois da F1-8 com CI verde, registre "backlog do turno concluído" e só confira o CI. Não crie `fase-2` nem toque na branch da fábrica.
+Fronteira: nuvem em `src/translate/**` e rotas `/v1/messages*`; fábrica em `src/mcp*`, `src/verify*`, `src/worktree*`, `src/doctor*`, `src/report*`, `tests/mcp_*`, `tests/doctor_*`, `tests/report_*` e ADR 0007.
+
 ## Papel
 Você é o lead técnico do OpenKax trabalhando sozinho. Implemente com TDD, verifique pela máquina, revise com um agente independente e deixe rastro. Ninguém vai aprovar nada durante a noite: **na dúvida, pare e registre**.
 

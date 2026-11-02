@@ -231,66 +231,73 @@
     {
       "id": "F2-1",
       "title": "CONTRACT: openkax mcp (stdio, rmcp), schemas das tools, TaskPacket/TaskResult, .kax/verify.toml, ADR 0007",
-      "owner": "lead",
+      "owner": "fabrica",
       "status": "todo",
       "depends": [
         "F1-8"
-      ]
+      ],
+      "note": "Frente da fábrica, na branch Kaxcav/openkax-fase-2 (docs/noturno/FABRICA.md nessa branch). Não é do turno na nuvem."
     },
     {
       "id": "F2-2",
       "title": "Worktree por tarefa, openkax clean, isolamento",
-      "owner": "lead",
+      "owner": "fabrica",
       "status": "todo",
       "depends": [
         "F2-1"
-      ]
+      ],
+      "note": "Frente da fábrica, na branch Kaxcav/openkax-fase-2 (docs/noturno/FABRICA.md nessa branch). Não é do turno na nuvem."
     },
     {
       "id": "F2-3",
       "title": "Pacote enxuto e estimativa contra max_packet_tokens",
-      "owner": "lead",
+      "owner": "fabrica",
       "status": "todo",
       "depends": [
         "F2-1"
-      ]
+      ],
+      "note": "Frente da fábrica, na branch Kaxcav/openkax-fase-2 (docs/noturno/FABRICA.md nessa branch). Não é do turno na nuvem."
     },
     {
       "id": "F2-4",
       "title": "Aplicar diff no worktree e rodar accept.verify com timeout",
-      "owner": "lead",
+      "owner": "fabrica",
       "status": "todo",
       "depends": [
         "F2-2",
         "F2-3"
-      ]
+      ],
+      "note": "Frente da fábrica, na branch Kaxcav/openkax-fase-2 (docs/noturno/FABRICA.md nessa branch). Não é do turno na nuvem."
     },
     {
       "id": "F2-5",
       "title": "Retry no próximo candidato com stderr; aceito vira branch kax/<id>",
-      "owner": "lead",
+      "owner": "fabrica",
       "status": "todo",
       "depends": [
         "F2-4"
-      ]
+      ],
+      "note": "Frente da fábrica, na branch Kaxcav/openkax-fase-2 (docs/noturno/FABRICA.md nessa branch). Não é do turno na nuvem."
     },
     {
       "id": "F2-6",
       "title": "delegate_batch com parallelism, status, quota, ledger kind:task, memória em rajada de 8",
-      "owner": "lead",
+      "owner": "fabrica",
       "status": "todo",
       "depends": [
         "F2-5"
-      ]
+      ],
+      "note": "Frente da fábrica, na branch Kaxcav/openkax-fase-2 (docs/noturno/FABRICA.md nessa branch). Não é do turno na nuvem."
     },
     {
       "id": "F2-7",
       "title": "Docs: ADR 0007 Aceito, docs/smoke/fase-2-aceite.md, exemplo de .kax/verify.toml",
-      "owner": "lead",
+      "owner": "fabrica",
       "status": "todo",
       "depends": [
         "F2-6"
-      ]
+      ],
+      "note": "Frente da fábrica, na branch Kaxcav/openkax-fase-2 (docs/noturno/FABRICA.md nessa branch). Não é do turno na nuvem."
     }
   ]
 }
