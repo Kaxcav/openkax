@@ -66,17 +66,14 @@
       "id": "F0-11",
       "title": "WindowsPlatform + workflow CI windows-latest (artefato .exe, tamanho)",
       "owner": "lead",
-      "status": "in_progress",
-      "note": "WindowsPlatform feito (item 0, 2026-11-02); falta workflow de CI e medição do .exe"
+      "status": "done",
+      "note": "WindowsPlatform (item 0) + .github/workflows/ci.yml (ubuntu/windows: fmt, clippy, testes, release, artefato com tamanho e teto de 8 MB). Local: openkax.exe 3.086.336 B; WS ocioso 8,29 MiB"
     },
     {
       "id": "F0-12",
       "title": "Aceite manual: Continue/Cline em kax/coder-fast e kax/coder-smart; RSS ocioso",
       "owner": "user",
-      "status": "todo",
-      "blocked_by": [
-        "F0-08"
-      ]
+      "status": "todo"
     },
     {
       "id": "F0-13",
