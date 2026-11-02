@@ -37,7 +37,7 @@ No início, depois do portão, leia a última entrada de `docs/noturno/LOG.md` n
 4. TDD: testes primeiro (devem falhar), implementação, `cargo test`, `cargo clippy -D warnings`.
 5. **Revisão independente:** suba um subagente sem contexto desta conversa, entregue o diff (`git diff origin/fase-1...HEAD`) e o trecho do PLANO/ADR que ele deve honrar, e peça defeitos concretos. Corrija o que for confirmado; registre no LOG o que foi descartado e por quê.
 6. Commit(s) `tipo(escopo): resumo`, push na branch de trabalho.
-7. PR em **draft** (bases conforme o Portão) (crie se não existir via `gh api repos/Kaxcav/openkax/pulls -f head=fase-1 -f base=main -F draft=true ...`; GraphQL não funciona, use REST). Atualize o checklist do corpo.
+7. PR em **draft** (bases conforme o Portão) (crie se não existir via `gh api repos/Kaxcav/openkax/pulls -f head=<branch> -f base=<base> -F draft=true ...`; GraphQL não funciona, use REST). Atualize o checklist do corpo.
 8. Confira o CI do push (`gh api "repos/Kaxcav/openkax/actions/runs?branch=<branch>&per_page=1"`). Se a execução acabar antes do CI, a próxima confere primeiro.
 9. `tasks.json`: status da tarefa, nota com números. `LOG.md`: troque `EM ANDAMENTO` por `FEITO`/`BLOQUEADO` com resumo de 3–6 linhas (o que entrou, testes, CI, pendências).
 
