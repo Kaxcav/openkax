@@ -27,10 +27,18 @@ pub struct Secrets {
 impl Secrets {
     /// Lê do ambiente cada `auth.env` declarado na config. Vazio = ausente.
     pub fn from_env(config: &Config) -> Self {
-        Self::from_pairs(config.providers.iter().filter_map(|p| match &p.auth {
-            Auth::Bearer { env } => std::env::var(env).ok().map(|v| (env.clone(), v)),
-            Auth::Passthrough | Auth::None => None,
-        }))
+        let mut names: Vec<String> = Vec::new();
+        for p in &config.providers {
+            if let Auth::Bearer { env } = &p.auth {
+                names.push(env.clone());
+            }
+            names.extend(p.env_refs());
+        }
+        Self::from_pairs(
+            names
+                .into_iter()
+                .filter_map(|n| std::env::var(&n).ok().map(|v| (n, v))),
+        )
     }
 
     /// Para testes e para fontes que não sejam o ambiente do processo.
@@ -115,6 +123,16 @@ pub struct StartedStream {
     pub rest: BoxStream<'static, Result<ChatCompletionChunk, UpstreamError>>,
 }
 
+/// Resultado de uma tentativa, com o que os headers de resposta disseram
+/// (mesmo quando a tentativa falhou).
+pub struct Attempt {
+    pub result: Result<StartedStream, UpstreamError>,
+    /// Saldo restante pelos headers mapeados em `quirks.ratelimit_headers`.
+    pub remaining: crate::scheduler::Remaining,
+    /// Headers de limite (`x-ratelimit-*`, `retry-after`, …) para depuração.
+    pub limit_headers: Vec<(String, String)>,
+}
+
 /// Cliente HTTP compartilhado (um `reqwest::Client` para todos os providers).
 #[derive(Clone)]
 pub struct ProviderClient {
@@ -135,9 +153,11 @@ impl ProviderClient {
         &self.http
     }
 
-    /// Abre um stream em `provider` com o modelo real e espera até o 1º token
-    /// (ou um `finish_reason`), respeitando `first_token_timeout`. Qualquer
+    /// Abre um stream em `provider` (já com `${VAR}` resolvidas) e espera até o
+    /// 1º token (ou um `finish_reason`). Deltas de raciocínio estendem o prazo
+    /// até `first_token_timeout_reasoning`, mas não são commit (N4). Qualquer
     /// falha aqui é elegível para fallback.
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_stream(
         &self,
         provider: &crate::config::Provider,
@@ -146,7 +166,13 @@ impl ProviderClient {
         max_tokens_override: Option<u32>,
         request: &ChatCompletionRequest,
         first_token_timeout: Duration,
-    ) -> Result<StartedStream, UpstreamError> {
+        first_token_timeout_reasoning: Duration,
+    ) -> Attempt {
+        let mut attempt = Attempt {
+            result: Err(UpstreamError::FirstTokenTimeout),
+            remaining: Default::default(),
+            limit_headers: Vec::new(),
+        };
         let url = format!(
             "{}/chat/completions",
             provider.base_url.trim_end_matches('/')
@@ -164,45 +190,80 @@ impl ProviderClient {
             rb = rb.header(k, v);
         }
 
-        let attempt = async move {
-            let resp = rb.send().await.map_err(map_reqwest)?;
-            let status = resp.status();
-            if !status.is_success() {
-                let headers = resp.headers().clone();
-                let body = read_capped(resp, ERROR_BODY_CAP).await;
-                return Err(classify_status(
-                    status.as_u16(),
-                    &headers,
-                    &body,
-                    SystemTime::now(),
-                ));
+        let t0 = tokio::time::Instant::now();
+        let deadline = t0 + first_token_timeout;
+        let resp = match tokio::time::timeout_at(deadline, rb.send()).await {
+            Err(_) => return attempt,
+            Ok(Err(e)) => {
+                attempt.result = Err(map_reqwest(e));
+                return attempt;
             }
-            let mut events = SseEvents::new(resp.bytes_stream().boxed());
-            let mut prelude = Vec::new();
-            loop {
-                match events.next().await {
-                    None => return Err(UpstreamError::Protocol("EOF antes do 1º token".into())),
-                    Some(Err(e)) => return Err(UpstreamError::Protocol(e)),
-                    Some(Ok(Event::Done)) => {
-                        return Err(UpstreamError::Protocol("[DONE] antes do 1º token".into()));
-                    }
-                    Some(Ok(Event::Chunk(c))) => {
-                        let first = is_first_token(&c);
-                        let finished = has_finish(&c);
-                        prelude.push(c);
-                        if first || finished {
-                            return Ok(StartedStream {
-                                prelude,
-                                rest: events.into_rest(finished),
-                            });
-                        }
-                    }
+            Ok(Ok(r)) => r,
+        };
+        attempt.remaining =
+            remaining_from_headers(&provider.quirks.ratelimit_headers, resp.headers());
+        attempt.limit_headers = limit_headers(resp.headers());
+        let status = resp.status();
+        if !status.is_success() {
+            let headers = resp.headers().clone();
+            let body = tokio::time::timeout_at(deadline, read_capped(resp, ERROR_BODY_CAP))
+                .await
+                .unwrap_or_default();
+            attempt.result = Err(classify_status(
+                status.as_u16(),
+                &headers,
+                &body,
+                SystemTime::now(),
+            ));
+            return attempt;
+        }
+        let mut events = SseEvents::new(resp.bytes_stream().boxed());
+        attempt.result = await_first_token(
+            &mut events,
+            t0,
+            first_token_timeout,
+            first_token_timeout_reasoning,
+        )
+        .await
+        .map(|(prelude, finished)| StartedStream {
+            prelude,
+            rest: events.into_rest(finished),
+        });
+        attempt
+    }
+}
+
+/// Lê eventos até o 1º token (ou `finish_reason`). Prazo: `t0 + ft`;
+/// estendido para `t0 + ft_reasoning` quando chega raciocínio (sinal de vida).
+pub(crate) async fn await_first_token(
+    events: &mut SseEvents,
+    t0: tokio::time::Instant,
+    ft: Duration,
+    ft_reasoning: Duration,
+) -> Result<(Vec<ChatCompletionChunk>, bool), UpstreamError> {
+    let mut deadline = t0 + ft;
+    let mut prelude = Vec::new();
+    loop {
+        let Ok(next) = tokio::time::timeout_at(deadline, events.next()).await else {
+            return Err(UpstreamError::FirstTokenTimeout);
+        };
+        match next {
+            None => return Err(UpstreamError::Protocol("EOF antes do 1º token".into())),
+            Some(Err(e)) => return Err(UpstreamError::Protocol(e)),
+            Some(Ok(Event::Done)) => {
+                return Err(UpstreamError::Protocol("[DONE] antes do 1º token".into()));
+            }
+            Some(Ok(Event::Chunk(c))) => {
+                if has_reasoning(&c) {
+                    deadline = deadline.max(t0 + ft_reasoning);
+                }
+                let first = is_first_token(&c);
+                let finished = has_finish(&c);
+                prelude.push(c);
+                if first || finished {
+                    return Ok((prelude, finished));
                 }
             }
-        };
-        match tokio::time::timeout(first_token_timeout, attempt).await {
-            Ok(r) => r,
-            Err(_) => Err(UpstreamError::FirstTokenTimeout),
         }
     }
 }
@@ -239,8 +300,8 @@ enum Event {
 }
 
 /// Eventos SSE de um corpo de resposta, já decodificados.
-struct SseEvents {
-    body: BoxStream<'static, reqwest::Result<Bytes>>,
+pub(crate) struct SseEvents {
+    body: BoxStream<'static, Result<Bytes, String>>,
     decoder: SseDecoder,
     pending: VecDeque<String>,
     eof: bool,
@@ -248,6 +309,13 @@ struct SseEvents {
 
 impl SseEvents {
     fn new(body: BoxStream<'static, reqwest::Result<Bytes>>) -> Self {
+        Self::from_bytes(
+            body.map(|r| r.map_err(|e| map_reqwest(e).to_string()))
+                .boxed(),
+        )
+    }
+
+    pub(crate) fn from_bytes(body: BoxStream<'static, Result<Bytes, String>>) -> Self {
         Self {
             body,
             decoder: SseDecoder::default(),
@@ -268,7 +336,7 @@ impl SseEvents {
                 Some(Ok(bytes)) => self.pending.extend(self.decoder.push(&bytes)),
                 Some(Err(e)) => {
                     self.eof = true;
-                    return Some(Err(map_reqwest(e).to_string()));
+                    return Some(Err(e));
                 }
                 None => self.eof = true,
             }
@@ -336,6 +404,90 @@ pub fn is_first_token(chunk: &ChatCompletionChunk) -> bool {
         c.delta.content.as_deref().is_some_and(|t| !t.is_empty())
             || c.delta.tool_calls.as_ref().is_some_and(|t| !t.is_empty())
     })
+}
+
+/// Campos de raciocínio conhecidos nos deltas (DeepSeek/Z.ai: `reasoning_content`;
+/// OpenRouter/gpt-oss: `reasoning`).
+const REASONING_FIELDS: [&str; 3] = ["reasoning_content", "reasoning", "reasoning_details"];
+
+/// O chunk traz raciocínio (sinal de vida, não commit) — N4.
+pub fn has_reasoning(chunk: &ChatCompletionChunk) -> bool {
+    chunk.choices.iter().any(|c| {
+        REASONING_FIELDS
+            .iter()
+            .any(|f| match c.delta.extra.get(*f) {
+                Some(Value::String(s)) => !s.is_empty(),
+                Some(Value::Array(a)) => !a.is_empty(),
+                Some(Value::Null) | None => false,
+                Some(_) => true,
+            })
+    })
+}
+
+/// Remove o raciocínio dos deltas (não vai ao cliente). Devolve os chars removidos.
+pub fn strip_reasoning(chunk: &mut ChatCompletionChunk) -> usize {
+    let mut n = 0;
+    for c in &mut chunk.choices {
+        for f in REASONING_FIELDS {
+            if let Some(v) = c.delta.extra.remove(f) {
+                n += match v {
+                    Value::String(s) => s.chars().count(),
+                    other => other.to_string().chars().count(),
+                };
+            }
+        }
+    }
+    n
+}
+
+/// Nada para o cliente: sem role, conteúdo, tool_calls, finish, usage nem outro campo.
+pub fn is_empty_chunk(chunk: &ChatCompletionChunk) -> bool {
+    chunk.usage.is_none()
+        && chunk.choices.iter().all(|c| {
+            c.finish_reason.is_none()
+                && c.delta.role.is_none()
+                && c.delta.content.as_deref().is_none_or(str::is_empty)
+                && c.delta.tool_calls.as_ref().is_none_or(Vec::is_empty)
+                && c.delta.extra.is_empty()
+        })
+}
+
+/// Saldo restante pelos headers configurados (valor não numérico é ignorado).
+pub fn remaining_from_headers(
+    names: &crate::config::RateLimitHeaders,
+    headers: &HeaderMap,
+) -> crate::scheduler::Remaining {
+    let get = |n: &Option<String>| {
+        n.as_deref()
+            .and_then(|n| headers.get(n))
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .map(|v| v.floor() as i64)
+    };
+    crate::scheduler::Remaining {
+        rpm: get(&names.rpm),
+        tpm: get(&names.tpm),
+        rpd: get(&names.rpd),
+        tpd: get(&names.tpd),
+    }
+}
+
+/// Headers de limite para depuração/calibração. Lista branca por prefixo:
+/// nunca auth, cookies ou qualquer outro header.
+pub fn limit_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = headers
+        .iter()
+        .filter(|(k, _)| {
+            let k = k.as_str();
+            k.starts_with("x-ratelimit-")
+                || k.starts_with("ratelimit")
+                || k == "retry-after"
+                || k.starts_with("x-request-limit")
+        })
+        .filter_map(|(k, v)| Some((k.as_str().to_owned(), v.to_str().ok()?.to_owned())))
+        .collect();
+    v.sort();
+    v
 }
 
 /// Classifica uma resposta HTTP não-2xx do upstream.
@@ -506,6 +658,14 @@ pub fn build_upstream_body(
             obj.remove("tools");
         } else if tc != "auto" {
             obj.insert("tool_choice".into(), "auto".into());
+        }
+    }
+
+    if let Some(frag) = &q.disable_thinking
+        && let Ok(Value::Object(frag)) = serde_json::to_value(frag)
+    {
+        for (k, v) in frag {
+            obj.insert(k, v);
         }
     }
 

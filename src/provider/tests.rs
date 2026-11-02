@@ -242,3 +242,143 @@ fn upstream_body_without_stream_usage_quirk() {
 fn http_client_builds_with_ring_provider() {
     build_http_client(Duration::from_secs(5)).expect("reqwest::Client com rustls+ring");
 }
+
+// ---------------------------------------------------------------- N4: raciocínio
+
+/// Stream de bytes com atrasos virtuais (tokio com tempo pausado).
+fn timed(events: Vec<(u64, String)>) -> SseEvents {
+    let s = futures::stream::unfold(events.into_iter(), |mut it| async move {
+        let (delay_ms, data) = it.next()?;
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        Some((Ok::<_, String>(Bytes::from(data)), it))
+    });
+    SseEvents::from_bytes(Box::pin(s))
+}
+
+fn ev(delta: Value) -> String {
+    format!(
+        "data: {}\n\n",
+        json!({ "choices": [{ "index": 0, "delta": delta, "finish_reason": null }] })
+    )
+}
+
+const FT: Duration = Duration::from_secs(1);
+const FTR: Duration = Duration::from_secs(30);
+
+#[tokio::test(start_paused = true)]
+async fn reasoning_extends_first_token_deadline_without_committing() {
+    let mut e = timed(vec![
+        (
+            200,
+            ev(json!({ "role": "assistant", "reasoning_content": "pensando" })),
+        ),
+        (5000, ev(json!({ "reasoning": "mais" }))),
+        (5000, ev(json!({ "content": "ok" }))),
+    ]);
+    let t0 = tokio::time::Instant::now();
+    let (prelude, finished) = await_first_token(&mut e, t0, FT, FTR).await.unwrap();
+    assert!(!finished);
+    assert_eq!(prelude.len(), 3);
+    assert!(is_first_token(prelude.last().unwrap()));
+    assert!(has_reasoning(&prelude[0]) && has_reasoning(&prelude[1]));
+    assert!(!is_first_token(&prelude[0]), "raciocínio não é commit");
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_reasoning_keeps_short_deadline() {
+    let mut e = timed(vec![(5000, ev(json!({ "content": "tarde" })))]);
+    let t0 = tokio::time::Instant::now();
+    let r = await_first_token(&mut e, t0, FT, FTR).await;
+    assert_eq!(r.unwrap_err(), UpstreamError::FirstTokenTimeout);
+    assert!(
+        t0.elapsed() < Duration::from_millis(1100),
+        "{:?}",
+        t0.elapsed()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn reasoning_deadline_is_capped() {
+    let mut e = timed(vec![
+        (200, ev(json!({ "reasoning_content": "hmm" }))),
+        (60_000, ev(json!({ "content": "tarde demais" }))),
+    ]);
+    let t0 = tokio::time::Instant::now();
+    let r = await_first_token(&mut e, t0, FT, FTR).await;
+    assert_eq!(r.unwrap_err(), UpstreamError::FirstTokenTimeout);
+    let el = t0.elapsed();
+    assert!(el >= FTR && el < FTR + Duration::from_millis(100), "{el:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn reasoning_then_eof_is_pre_first_token_failure() {
+    let mut e = timed(vec![(100, ev(json!({ "reasoning_content": "hmm" })))]);
+    let r = await_first_token(&mut e, tokio::time::Instant::now(), FT, FTR).await;
+    assert!(matches!(r, Err(UpstreamError::Protocol(_))), "{r:?}");
+}
+
+#[test]
+fn strip_reasoning_removes_fields_and_reports_chars() {
+    let mut c = chunk(json!({ "content": "a", "reasoning_content": "xyz" }), None);
+    assert_eq!(strip_reasoning(&mut c), 3);
+    assert!(!has_reasoning(&c));
+    assert_eq!(c.choices[0].delta.content.as_deref(), Some("a"));
+    assert!(!is_empty_chunk(&c));
+
+    let mut only = chunk(json!({ "reasoning": "pensando" }), None);
+    assert_eq!(strip_reasoning(&mut only), 8);
+    assert!(
+        is_empty_chunk(&only),
+        "chunk só de raciocínio não vai ao cliente"
+    );
+
+    let role = chunk(json!({ "role": "assistant" }), None);
+    assert!(!is_empty_chunk(&role));
+    assert!(!is_empty_chunk(&chunk(json!({}), Some("stop"))));
+}
+
+// ---------------------------------------------------------------- quirks novos
+
+#[test]
+fn upstream_body_merges_disable_thinking() {
+    let p = provider_from("quirks = { disable_thinking = { thinking = { type = \"disabled\" } } }");
+    let b = build_upstream_body(&p, &request(json!({})), "real", None);
+    assert_eq!(b["thinking"]["type"], "disabled");
+}
+
+#[test]
+fn remaining_from_headers_uses_configured_names() {
+    let p = provider_from(
+        "quirks = { ratelimit_headers = { rpd = \"x-ratelimit-remaining-requests-day\", rpm = \"x-ratelimit-remaining-requests\" } }",
+    );
+    let mut h = HeaderMap::new();
+    h.insert(
+        "x-ratelimit-remaining-requests-day",
+        HeaderValue::from_static("17"),
+    );
+    h.insert(
+        "x-ratelimit-remaining-requests",
+        HeaderValue::from_static("lixo"),
+    );
+    let r = remaining_from_headers(&p.quirks.ratelimit_headers, &h);
+    assert_eq!(r.rpd, Some(17));
+    assert_eq!(r.rpm, None);
+    assert_eq!(r.tpd, None);
+}
+
+#[test]
+fn ratelimit_headers_for_debug_only_expose_limit_names() {
+    let mut h = HeaderMap::new();
+    h.insert("x-ratelimit-limit-requests", HeaderValue::from_static("20"));
+    h.insert("retry-after", HeaderValue::from_static("3"));
+    h.insert("authorization", HeaderValue::from_static("Bearer segredo"));
+    h.insert("set-cookie", HeaderValue::from_static("a=b"));
+    let v = limit_headers(&h);
+    assert_eq!(
+        v,
+        vec![
+            ("retry-after".to_owned(), "3".to_owned()),
+            ("x-ratelimit-limit-requests".to_owned(), "20".to_owned())
+        ]
+    );
+}

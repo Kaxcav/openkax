@@ -47,7 +47,12 @@ pub struct RequestRecord {
     pub ttft_ms: Option<u64>,
     /// Quantos candidatos falharam antes do que respondeu.
     pub fallbacks: u32,
-    pub paid: bool,
+    /// Tier do provider que atendeu (N3): métrica "caiu em degrau credit/paid".
+    pub tier: Option<crate::config::Tier>,
+    /// Upstream mandou deltas de raciocínio (removidos antes do cliente).
+    pub reasoning: bool,
+    /// Request com `x-openkax-pin` (depuração/smoke).
+    pub pinned: bool,
     pub outcome: Outcome,
 }
 
@@ -195,7 +200,9 @@ mod tests {
             latency_ms: 5,
             ttft_ms: Some(2),
             fallbacks: 1,
-            paid: false,
+            tier: Some(crate::config::Tier::Credit),
+            reasoning: false,
+            pinned: false,
             outcome: Outcome::RequestFault,
         })
     }
@@ -223,6 +230,7 @@ mod tests {
         assert_eq!(v["kind"], "request");
         assert_eq!(v["outcome"], "request_fault");
         assert_eq!(v["in"], 9);
+        assert_eq!(v["tier"], "credit");
         assert_eq!(std::fs::read_to_string(&f2).unwrap().lines().count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }

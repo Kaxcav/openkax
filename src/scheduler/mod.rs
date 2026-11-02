@@ -91,6 +91,8 @@ pub enum DisabledReason {
     ConfigDisabled,
     /// Protocolo ainda não suportado nesta rota (nativo Anthropic até a Fase 1).
     Unsupported,
+    /// `${VAR}` de `base_url`/`extra_headers` ausente no ambiente (N1).
+    MissingEnv,
 }
 
 /// Um degrau elegível da rota, na ordem de fallback.
@@ -127,6 +129,8 @@ pub enum Skip {
         ready_in: Duration,
     },
     Disabled(DisabledReason),
+    /// Família excluída por `x-openkax-exclude-family` (N5).
+    Excluded,
 }
 
 /// Resultado de [`Scheduler::pick`].
@@ -145,7 +149,7 @@ impl Pick {
             .iter()
             .filter_map(|(_, s)| match s {
                 Skip::NotNow { ready_in } | Skip::Cooldown { ready_in } => Some(*ready_in),
-                Skip::NeverFits | Skip::Disabled(_) => None,
+                Skip::NeverFits | Skip::Disabled(_) | Skip::Excluded => None,
             })
             .min()
     }
@@ -156,6 +160,33 @@ impl Pick {
             && !self.skipped.is_empty()
             && self.skipped.iter().all(|(_, s)| *s == Skip::NeverFits)
     }
+}
+
+/// Filtros de candidatos por request.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PickOptions {
+    /// Famílias (`models[].family`) fora da rota; comparação sem caixa.
+    pub exclude_families: Vec<String>,
+}
+
+/// Falha de `pick_pinned` (header de depuração `x-openkax-pin`).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PinError {
+    #[error(transparent)]
+    Pick(#[from] PickError),
+    #[error("pin aponta para provider/modelo inexistente")]
+    UnknownTarget,
+    #[error("modelo fixado está desabilitado: {0:?}")]
+    Disabled(DisabledReason),
+}
+
+/// Saldo restante informado pelo upstream em headers (corrige buckets).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Remaining {
+    pub rpm: Option<i64>,
+    pub tpm: Option<i64>,
+    pub rpd: Option<i64>,
+    pub tpd: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -182,6 +213,10 @@ pub struct QuotaSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProviderQuota {
     pub id: String,
+    pub tier: crate::config::Tier,
+    /// Variáveis `${VAR}` ausentes (N1).
+    pub missing_env: Vec<String>,
+    pub in_flight: u32,
     pub state: StateView,
     pub chars_per_token: f64,
     pub rpm_remaining: Option<i64>,
@@ -198,6 +233,8 @@ pub struct ModelQuota {
     pub state: StateView,
     /// 400/413/422 recebidos (A3): quirk errado não pode ficar invisível.
     pub request_faults: u64,
+    pub family: Option<String>,
+    pub in_flight: u32,
     pub rpm_remaining: Option<i64>,
     pub tpm_remaining: Option<i64>,
     pub rpd_remaining: Option<i64>,
@@ -229,6 +266,8 @@ const EMA_ALPHA: f64 = 0.2;
 const CPT_MIN: f64 = 1.5;
 const CPT_MAX: f64 = 8.0;
 const MIN_COOLDOWN: Duration = Duration::from_secs(1);
+/// Dica de espera quando o escopo está no teto de concorrência.
+const CONCURRENCY_WAIT: Duration = Duration::from_secs(1);
 
 struct Shared {
     clock: Arc<dyn Clock>,
@@ -239,6 +278,8 @@ struct Shared {
 
 struct ProviderRt {
     id: Arc<str>,
+    missing_env: Vec<String>,
+    tier: crate::config::Tier,
     cooldown: crate::config::Cooldown,
     safety: f64,
     tpm_counts_max_tokens: bool,
@@ -255,12 +296,20 @@ struct ProviderScope {
 
 struct ModelRt {
     id: Arc<str>,
+    family: Option<String>,
     upstream: Option<Arc<str>>,
     max_ctx: Option<u32>,
     /// Tem `limits` próprios → 429 cai neste escopo.
     own_limits: bool,
     /// Lock 2.
     scope: Mutex<Scope>,
+}
+
+/// Medidas da request independentes do provider.
+struct Estimate {
+    chars: usize,
+    messages: usize,
+    requested_out: Option<u32>,
 }
 
 struct ClassRt {
@@ -339,6 +388,8 @@ struct Scope {
     cooldown_until: Option<Instant>,
     disabled: Option<DisabledReason>,
     request_faults: u64,
+    max_concurrent: Option<u32>,
+    in_flight: u32,
 }
 
 impl Scope {
@@ -366,6 +417,8 @@ impl Scope {
             cooldown_until: None,
             disabled: None,
             request_faults: 0,
+            max_concurrent: limits.and_then(|l| l.max_concurrent),
+            in_flight: 0,
         }
     }
 
@@ -415,6 +468,9 @@ impl Scope {
             });
         }
         let mut wait = Duration::ZERO;
+        if self.max_concurrent.is_some_and(|max| self.in_flight >= max) {
+            wait = CONCURRENCY_WAIT;
+        }
         if let Some(r) = &self.rpm {
             wait = wait.max(r.wait_for(1.0));
         }
@@ -436,7 +492,35 @@ impl Scope {
         }
     }
 
+    /// Corrige buckets que este escopo possui com o saldo informado pelo upstream.
+    /// Devolve os campos que não eram deste escopo.
+    fn apply_remaining(&mut self, r: Remaining) -> Remaining {
+        let mut left = Remaining::default();
+        match (&mut self.rpm, r.rpm) {
+            (Some(b), Some(v)) => b.level = (v as f64).min(b.cap),
+            (None, v) => left.rpm = v,
+            _ => {}
+        }
+        match (&mut self.tpm, r.tpm) {
+            (Some(b), Some(v)) => b.level = (v as f64).min(b.cap),
+            (None, v) => left.tpm = v,
+            _ => {}
+        }
+        match (&mut self.rpd, r.rpd) {
+            (Some(d), Some(v)) => d.used = (d.limit as i64 - v).max(0),
+            (None, v) => left.rpd = v,
+            _ => {}
+        }
+        match (&mut self.tpd, r.tpd) {
+            (Some(d), Some(v)) => d.used = (d.limit as i64 - v).max(0),
+            (None, v) => left.tpd = v,
+            _ => {}
+        }
+        left
+    }
+
     fn charge_request(&mut self) {
+        self.in_flight += 1;
         if let Some(r) = &mut self.rpm {
             r.level -= 1.0;
         }
@@ -502,7 +586,7 @@ impl Scope {
 fn combine(a: Result<(), Skip>, b: Result<(), Skip>) -> Result<(), Skip> {
     fn rank(s: &Skip) -> u8 {
         match s {
-            Skip::Disabled(_) => 3,
+            Skip::Disabled(_) | Skip::Excluded => 3,
             Skip::NeverFits => 2,
             Skip::Cooldown { .. } | Skip::NotNow { .. } => 1,
         }
@@ -547,6 +631,8 @@ impl Scheduler {
             .iter()
             .map(|p| {
                 let mut scope = Scope::new(Some(&p.limits), d.daily_reset_utc, now, utc);
+                let missing_env: Vec<String> =
+                    p.env_refs().into_iter().filter(|v| !has_key(v)).collect();
                 scope.disabled = if !p.enabled {
                     Some(DisabledReason::ConfigDisabled)
                 } else if p.native.is_some() {
@@ -554,6 +640,7 @@ impl Scheduler {
                 } else {
                     match &p.auth {
                         Auth::Bearer { env } if !has_key(env) => Some(DisabledReason::MissingKey),
+                        _ if !missing_env.is_empty() => Some(DisabledReason::MissingEnv),
                         _ => None,
                     }
                 };
@@ -562,6 +649,7 @@ impl Scheduler {
                     .iter()
                     .map(|m| ModelRt {
                         id: m.id.as_str().into(),
+                        family: m.family.clone(),
                         upstream: m.upstream.as_deref().map(Into::into),
                         max_ctx: m.max_ctx.or(p.limits.max_ctx),
                         own_limits: m.limits.is_some(),
@@ -575,6 +663,8 @@ impl Scheduler {
                     .collect();
                 ProviderRt {
                     id: p.id.as_str().into(),
+                    missing_env,
+                    tier: p.tier,
                     cooldown: p.cooldown(),
                     safety: p.safety_factor.unwrap_or(d.safety_factor),
                     tpm_counts_max_tokens: p.quirks.tpm_counts_max_tokens,
@@ -619,6 +709,82 @@ impl Scheduler {
 
     /// Filtra e ordena os degraus elegíveis de `class_id`. Não debita nada.
     pub fn pick(&self, class_id: &str, request: &ChatCompletionRequest) -> Result<Pick, PickError> {
+        self.pick_with(class_id, request, &PickOptions::default())
+    }
+
+    /// [`pick`](Self::pick) com filtros (N5).
+    pub fn pick_with(
+        &self,
+        class_id: &str,
+        request: &ChatCompletionRequest,
+        opts: &PickOptions,
+    ) -> Result<Pick, PickError> {
+        let (class, est) = self.prepare(class_id, request)?;
+        let mut pick = Pick {
+            candidates: Vec::new(),
+            skipped: Vec::new(),
+        };
+        for (i, step) in class.steps.iter().enumerate() {
+            let Some((pi, mi)) = *step else {
+                pick.skipped
+                    .push((i, Skip::Disabled(DisabledReason::Unsupported)));
+                continue;
+            };
+            let family = self.shared.providers[pi].models[mi].family.as_deref();
+            if family.is_some_and(|f| {
+                opts.exclude_families
+                    .iter()
+                    .any(|x| x.eq_ignore_ascii_case(f))
+            }) {
+                pick.skipped.push((i, Skip::Excluded));
+                continue;
+            }
+            match self.evaluate(pi, mi, &est) {
+                Ok(c) => pick.candidates.push(c),
+                Err(skip) => pick.skipped.push((i, skip)),
+            }
+        }
+        Ok(pick)
+    }
+
+    /// Candidato fixo (`x-openkax-pin: provider/modelo`), mesmo fora da rota da
+    /// classe. Continua passando por gate, reserva e ledger.
+    pub fn pick_pinned(
+        &self,
+        class_id: &str,
+        provider_id: &str,
+        model_id: &str,
+        request: &ChatCompletionRequest,
+    ) -> Result<Pick, PinError> {
+        let (_, est) = self.prepare(class_id, request)?;
+        let sh = &*self.shared;
+        let pi = sh
+            .providers
+            .iter()
+            .position(|p| &*p.id == provider_id)
+            .ok_or(PinError::UnknownTarget)?;
+        let mi = sh.providers[pi]
+            .models
+            .iter()
+            .position(|m| &*m.id == model_id)
+            .ok_or(PinError::UnknownTarget)?;
+        let mut pick = Pick {
+            candidates: Vec::new(),
+            skipped: Vec::new(),
+        };
+        match self.evaluate(pi, mi, &est) {
+            Ok(c) => pick.candidates.push(c),
+            Err(Skip::Disabled(reason)) => return Err(PinError::Disabled(reason)),
+            Err(skip) => pick.skipped.push((0, skip)),
+        }
+        Ok(pick)
+    }
+
+    fn prepare(
+        &self,
+        class_id: &str,
+        request: &ChatCompletionRequest,
+    ) -> Result<(&ClassRt, Estimate), PickError> {
         let sh = &*self.shared;
         let class = sh
             .classes
@@ -633,59 +799,57 @@ impl Scheduler {
                 max: class.max_packet_tokens,
             });
         }
-        let requested_out = requested_max_tokens(request);
+        Ok((
+            class,
+            Estimate {
+                chars,
+                messages,
+                requested_out: requested_max_tokens(request),
+            },
+        ))
+    }
+
+    /// Veredito de um degrau (provider `pi`, modelo `mi`).
+    fn evaluate(&self, pi: usize, mi: usize, est: &Estimate) -> Result<Candidate, Skip> {
+        let sh = &*self.shared;
         let now = sh.clock.now();
         let utc = utc_secs(sh.clock.utc_now());
-
-        let mut pick = Pick {
-            candidates: Vec::new(),
-            skipped: Vec::new(),
-        };
-        for (i, step) in class.steps.iter().enumerate() {
-            let Some((pi, mi)) = *step else {
-                pick.skipped
-                    .push((i, Skip::Disabled(DisabledReason::Unsupported)));
-                continue;
-            };
-            let p = &sh.providers[pi];
-            let m = &p.models[mi];
-            let mut ps = lock(&p.state);
-            ps.scope.tick(now, utc);
-            let est = (f64::from(tokens_from(chars, messages, ps.chars_per_token)) * p.safety)
-                .ceil() as u32;
-            let (out_reserve, max_tokens_override) = p.output_plan(requested_out);
-            let reserve_tokens = est.saturating_add(out_reserve);
-
-            let verdict = if m.max_ctx.is_some_and(|ctx| est > ctx) {
-                Err(Skip::NeverFits)
-            } else {
-                let mut ms = lock(&m.scope);
-                ms.tick(now, utc);
-                combine(
-                    ps.scope.gate(reserve_tokens, now, utc),
-                    ms.gate(reserve_tokens, now, utc),
-                )
-            };
-            drop(ps);
-            match (verdict, &m.upstream) {
-                (Err(skip), _) => pick.skipped.push((i, skip)),
-                (Ok(()), None) => pick
-                    .skipped
-                    .push((i, Skip::Disabled(DisabledReason::ConfigDisabled))),
-                (Ok(()), Some(upstream)) => pick.candidates.push(Candidate {
-                    provider_idx: pi,
-                    model_idx: mi,
-                    provider_id: p.id.clone(),
-                    model_id: m.id.clone(),
-                    upstream_model: upstream.clone(),
-                    input_chars: chars,
-                    est_tokens: est,
-                    reserve_tokens,
-                    max_tokens_override,
-                }),
-            }
+        let p = &sh.providers[pi];
+        let m = &p.models[mi];
+        let mut ps = lock(&p.state);
+        ps.scope.tick(now, utc);
+        let tokens = (f64::from(tokens_from(est.chars, est.messages, ps.chars_per_token))
+            * p.safety)
+            .ceil() as u32;
+        let (out_reserve, max_tokens_override) = p.output_plan(est.requested_out);
+        let reserve_tokens = tokens.saturating_add(out_reserve);
+        let mut ms = lock(&m.scope);
+        ms.tick(now, utc);
+        let mut verdict = combine(
+            ps.scope.gate(reserve_tokens, now, utc),
+            ms.gate(reserve_tokens, now, utc),
+        );
+        if verdict.is_ok() && m.max_ctx.is_some_and(|ctx| tokens > ctx) {
+            verdict = Err(Skip::NeverFits);
         }
-        Ok(pick)
+        drop(ms);
+        drop(ps);
+        verdict?;
+        let upstream = m
+            .upstream
+            .clone()
+            .ok_or(Skip::Disabled(DisabledReason::ConfigDisabled))?;
+        Ok(Candidate {
+            provider_idx: pi,
+            model_idx: mi,
+            provider_id: p.id.clone(),
+            model_id: m.id.clone(),
+            upstream_model: upstream,
+            input_chars: est.chars,
+            est_tokens: tokens,
+            reserve_tokens,
+            max_tokens_override,
+        })
     }
 
     /// Re-checa e debita atomicamente (lock provider → modelo) 1 request e
@@ -707,7 +871,7 @@ impl Scheduler {
                 Err(Skip::NotNow { ready_in } | Skip::Cooldown { ready_in }) => {
                     return Err(NotNow { ready_in });
                 }
-                Err(Skip::NeverFits | Skip::Disabled(_)) => {
+                Err(Skip::NeverFits | Skip::Disabled(_) | Skip::Excluded) => {
                     return Err(NotNow {
                         ready_in: Duration::ZERO,
                     });
@@ -758,10 +922,15 @@ impl Scheduler {
             .providers
             .iter()
             .map(|p| {
-                let (state, cpt, [rpm, tpm, rpd, tpd]) = {
+                let (state, cpt, [rpm, tpm, rpd, tpd], in_flight) = {
                     let mut ps = lock(&p.state);
                     ps.scope.tick(now, utc);
-                    (ps.scope.view(now), ps.chars_per_token, ps.scope.remaining())
+                    (
+                        ps.scope.view(now),
+                        ps.chars_per_token,
+                        ps.scope.remaining(),
+                        ps.scope.in_flight,
+                    )
                 };
                 let models = p
                     .models
@@ -772,6 +941,8 @@ impl Scheduler {
                         let [rpm, tpm, rpd, tpd] = ms.remaining();
                         ModelQuota {
                             id: m.id.to_string(),
+                            family: m.family.clone(),
+                            in_flight: ms.in_flight,
                             upstream: m.upstream.as_deref().map(str::to_owned),
                             state: ms.view(now),
                             request_faults: ms.request_faults,
@@ -784,6 +955,9 @@ impl Scheduler {
                     .collect();
                 ProviderQuota {
                     id: p.id.to_string(),
+                    tier: p.tier,
+                    missing_env: p.missing_env.clone(),
+                    in_flight,
                     state,
                     chars_per_token: cpt,
                     rpm_remaining: rpm,
@@ -855,6 +1029,18 @@ impl Reservation {
 
     pub fn reserved_tokens(&self) -> u32 {
         self.reserved
+    }
+
+    /// Saldo informado pelo upstream (headers `x-ratelimit-*` mapeados no TOML):
+    /// corrige o bucket no escopo dono do limite (modelo antes do provider).
+    pub fn observe_remaining(&self, r: &Remaining) {
+        if *r == Remaining::default() {
+            return;
+        }
+        self.with_scopes(|ps, ms| {
+            let left = ms.apply_remaining(*r);
+            ps.scope.apply_remaining(left);
+        });
     }
 
     /// Sucesso: reconcilia com o `usage` real (refund ou charge) e recalibra chars/token.
@@ -955,6 +1141,8 @@ impl Reservation {
         self.closed = true;
         let delta = -i64::from(self.reserved);
         self.with_scopes(|ps, ms| {
+            ps.scope.in_flight = ps.scope.in_flight.saturating_sub(1);
+            ms.in_flight = ms.in_flight.saturating_sub(1);
             ps.scope.adjust_tokens(delta);
             ms.adjust_tokens(delta);
         });
@@ -969,6 +1157,8 @@ impl Reservation {
             self.input_chars,
         );
         self.with_scopes(|ps, ms| {
+            ps.scope.in_flight = ps.scope.in_flight.saturating_sub(1);
+            ms.in_flight = ms.in_flight.saturating_sub(1);
             let actual = match usage {
                 Some(u) => i64::from(u.prompt_tokens) + i64::from(u.completion_tokens),
                 None => i64::from(est_in) + (out_chars as f64 / ps.chars_per_token).ceil() as i64,

@@ -9,15 +9,21 @@
 //! - Nenhum candidato disponível: `429` com `Retry-After` (segundos, arredondado pra cima).
 //! - Erro de culpa da request (400/413/422): no máximo 1 candidato extra; dois
 //!   seguidos → status do upstream devolvido ao cliente (ADR 0003, A3).
+//! - Deltas de raciocínio nunca chegam ao cliente (ADR 0004, N4).
+//! - `x-openkax-exclude-family: glm,qwen` tira famílias da rota (N5).
+//! - `x-openkax-pin: provider/modelo` (depuração) fixa o candidato; continua
+//!   passando por reserva/ledger; modelo desabilitado → 409. Com pin, a resposta
+//!   traz os headers de limite do upstream como `x-openkax-upstream-<nome>`.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures::StreamExt;
@@ -25,10 +31,13 @@ use futures::stream::BoxStream;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
-use crate::config::{Auth, Config};
+use crate::config::{Auth, Config, Tier};
 use crate::ledger::{self, LedgerEntry, LedgerHandle, Outcome, RequestRecord};
 use crate::provider::{self, ProviderClient, Secrets, StartedStream, UpstreamError};
-use crate::scheduler::{Candidate, Clock, NotNow, PickError, Reservation, Scheduler, SystemClock};
+use crate::scheduler::{
+    Candidate, Clock, NotNow, Pick, PickError, PickOptions, PinError, Reservation, Scheduler,
+    SystemClock,
+};
 use crate::translate::openai::{
     ChatCompletionChunk, ChatCompletionRequest, ChunkChoice, Delta, Usage,
 };
@@ -37,6 +46,10 @@ pub use crate::provider::install_crypto_provider;
 
 /// Nome do header de resposta com o provider que atendeu.
 pub const PROVIDER_HEADER: &str = "x-openkax-provider";
+/// Header de request: famílias a excluir (separadas por vírgula).
+pub const EXCLUDE_FAMILY_HEADER: &str = "x-openkax-exclude-family";
+/// Header de request (depuração): `provider/modelo` fixo.
+pub const PIN_HEADER: &str = "x-openkax-pin";
 
 /// Dependências externas do servidor; tudo injetável para teste.
 pub struct Deps {
@@ -72,6 +85,11 @@ pub struct AppState {
 
 struct Inner {
     config: Config,
+    /// `config.providers` com `${VAR}` resolvidas (N1); ausentes ficam como estão
+    /// (o scheduler já os marca `MissingEnv`).
+    resolved: Vec<crate::config::Provider>,
+    /// Requests atendidas por tier (free, credit, paid) desde o start (N3).
+    served: [AtomicU64; 3],
     secrets: Secrets,
     scheduler: Scheduler,
     client: ProviderClient,
@@ -86,8 +104,17 @@ impl AppState {
         let scheduler = Scheduler::new(&deps.config, deps.clock, &|env| {
             deps.secrets.get(env).is_some()
         });
+        let lookup = |k: &str| deps.secrets.get(k).map(str::to_owned);
+        let resolved = deps
+            .config
+            .providers
+            .iter()
+            .map(|p| p.resolve_env(&lookup).unwrap_or_else(|_| p.clone()))
+            .collect();
         Ok(Self {
             inner: Arc::new(Inner {
+                resolved,
+                served: Default::default(),
                 config: deps.config,
                 secrets: deps.secrets,
                 scheduler,
@@ -155,6 +182,15 @@ async fn quota(State(st): State<AppState>) -> Response {
     let mut v = serde_json::to_value(st.scheduler().snapshot()).unwrap_or(Value::Null);
     if let Some(o) = v.as_object_mut() {
         o.insert("ledger_dropped".into(), st.ledger().dropped().into());
+        let served = &st.inner.served;
+        o.insert(
+            "served_by_tier".into(),
+            json!({
+                "free": served[0].load(Ordering::Relaxed),
+                "credit": served[1].load(Ordering::Relaxed),
+                "paid": served[2].load(Ordering::Relaxed),
+            }),
+        );
     }
     axum::Json(v).into_response()
 }
@@ -170,6 +206,8 @@ struct Meta {
     est_in: u32,
     started: Instant,
     fallbacks: u32,
+    pinned: bool,
+    reasoning: bool,
 }
 
 impl Meta {
@@ -181,7 +219,20 @@ impl Meta {
         ttft: Option<Duration>,
         outcome: Outcome,
     ) {
-        let paid = cand.is_some_and(|c| st.config().providers[c.provider_idx].paid);
+        let tier = cand.map(|c| st.config().providers[c.provider_idx].tier);
+        if let Some(t) = tier
+            && matches!(
+                outcome,
+                Outcome::Ok | Outcome::MidStreamError | Outcome::ClientDisconnected
+            )
+        {
+            let i = match t {
+                Tier::Free => 0,
+                Tier::Credit => 1,
+                Tier::Paid => 2,
+            };
+            st.inner.served[i].fetch_add(1, Ordering::Relaxed);
+        }
         st.ledger().record(LedgerEntry::Request(RequestRecord {
             ts: ledger::rfc3339(SystemTime::now()),
             route: self.route.clone(),
@@ -193,13 +244,22 @@ impl Meta {
             latency_ms: self.started.elapsed().as_millis() as u64,
             ttft_ms: ttft.map(|d| d.as_millis() as u64),
             fallbacks: self.fallbacks,
-            paid,
+            tier,
+            reasoning: self.reasoning,
+            pinned: self.pinned,
             outcome,
         }));
     }
 }
 
-async fn chat_completions(State(st): State<AppState>, body: Bytes) -> Response {
+fn header_str<'a>(h: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    h.get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
+async fn chat_completions(State(st): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let started = Instant::now();
     let req: ChatCompletionRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -216,6 +276,8 @@ async fn chat_completions(State(st): State<AppState>, body: Bytes) -> Response {
         est_in: 0,
         started,
         fallbacks: 0,
+        pinned: false,
+        reasoning: false,
     };
     if !req.model.starts_with("kax/") {
         meta.record(&st, None, None, None, Outcome::Rejected);
@@ -225,19 +287,18 @@ async fn chat_completions(State(st): State<AppState>, body: Bytes) -> Response {
             "esta rota aceita apenas classes kax/* (veja /v1/models)",
         );
     }
-    let pick = match st.scheduler().pick(&req.model, &req) {
+    let pick = match choose(&st, &headers, &req) {
         Ok(p) => p,
-        Err(e) => {
+        Err(resp) => {
             meta.record(&st, None, None, None, Outcome::Rejected);
-            let status = match e {
-                PickError::UnknownClass(_) => StatusCode::NOT_FOUND,
-                PickError::PacketTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
-            };
-            return error_response(status, "invalid_request_error", &e.to_string());
+            return resp;
         }
     };
+    meta.pinned = header_str(&headers, PIN_HEADER).is_some();
     meta.est_in = pick.candidates.first().map_or(0, |c| c.est_tokens);
-    let first_token_timeout = Duration::from_millis(st.config().defaults.first_token_timeout_ms);
+    let d = &st.config().defaults;
+    let first_token_timeout = Duration::from_millis(d.first_token_timeout_ms);
+    let first_token_timeout_reasoning = Duration::from_millis(d.first_token_timeout_reasoning_ms);
 
     let mut waits: Vec<Duration> = pick.retry_after().into_iter().collect();
     let mut fault: Option<(u16, String)> = None;
@@ -257,7 +318,7 @@ async fn chat_completions(State(st): State<AppState>, body: Bytes) -> Response {
                 continue;
             }
         };
-        let provider_cfg = &st.config().providers[cand.provider_idx];
+        let provider_cfg = &st.inner.resolved[cand.provider_idx];
         let attempt = st
             .inner
             .client
@@ -268,17 +329,50 @@ async fn chat_completions(State(st): State<AppState>, body: Bytes) -> Response {
                 cand.max_tokens_override,
                 &req,
                 first_token_timeout,
+                first_token_timeout_reasoning,
             )
             .await;
-        match attempt {
+        res.observe_remaining(&attempt.remaining);
+        let debug_headers = if meta.pinned {
+            attempt.limit_headers
+        } else {
+            Vec::new()
+        };
+        match attempt.result {
             Ok(stream) => {
                 res.first_token();
                 let ttft = started.elapsed();
-                return if req.is_stream() {
+                let mut resp = if req.is_stream() {
                     stream_response(st.clone(), meta, cand.clone(), res, stream, ttft, &req)
                 } else {
                     aggregate_response(&st, meta, cand, res, stream, ttft).await
                 };
+                add_upstream_headers(&mut resp, &debug_headers);
+                return resp;
+            }
+            Err(e) if meta.pinned => {
+                let outcome = if matches!(e, UpstreamError::RequestFault { .. }) {
+                    Outcome::RequestFault
+                } else {
+                    Outcome::Exhausted
+                };
+                res.fail(&e);
+                meta.fallbacks += 1;
+                meta.record(&st, Some(cand), None, None, outcome);
+                let mut resp = match &e {
+                    UpstreamError::RequestFault { status, message } => upstream_fault_response(
+                        StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_REQUEST),
+                        message,
+                    ),
+                    UpstreamError::RateLimited { .. } => error_response(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "rate_limit_error",
+                        &e.to_string(),
+                    ),
+                    _ => error_response(StatusCode::BAD_GATEWAY, "upstream_error", &e.to_string()),
+                };
+                add_upstream_headers(&mut resp, &debug_headers);
+                return resp;
             }
             Err(e) => {
                 tracing::warn!(
@@ -333,6 +427,78 @@ async fn chat_completions(State(st): State<AppState>, body: Bytes) -> Response {
     )
 }
 
+/// Escolhe os candidatos: pin (depuração) ou rota da classe com filtros.
+#[allow(clippy::result_large_err)]
+fn choose(
+    st: &AppState,
+    headers: &HeaderMap,
+    req: &ChatCompletionRequest,
+) -> Result<Pick, Response> {
+    let pick_err = |e: PickError| {
+        let status = match e {
+            PickError::UnknownClass(_) => StatusCode::NOT_FOUND,
+            PickError::PacketTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+        };
+        error_response(status, "invalid_request_error", &e.to_string())
+    };
+    if let Some(pin) = header_str(headers, PIN_HEADER) {
+        let Some((provider, model)) = pin.split_once('/') else {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "x-openkax-pin deve ser provider/modelo",
+            ));
+        };
+        return st
+            .scheduler()
+            .pick_pinned(&req.model, provider, model, req)
+            .map_err(|e| match e {
+                PinError::Pick(e) => pick_err(e),
+                PinError::UnknownTarget => error_response(
+                    StatusCode::NOT_FOUND,
+                    "model_not_found",
+                    &format!("pin {pin:?}: provider/modelo inexistente"),
+                ),
+                PinError::Disabled(reason) => {
+                    let reason = serde_json::to_value(reason)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_owned))
+                        .unwrap_or_default();
+                    error_response(
+                        StatusCode::CONFLICT,
+                        "model_disabled",
+                        &format!("pin {pin:?}: modelo desabilitado ({reason})"),
+                    )
+                }
+            });
+    }
+    let opts = PickOptions {
+        exclude_families: header_str(headers, EXCLUDE_FAMILY_HEADER)
+            .map(|v| {
+                v.split(',')
+                    .map(|f| f.trim().to_owned())
+                    .filter(|f| !f.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    st.scheduler()
+        .pick_with(&req.model, req, &opts)
+        .map_err(pick_err)
+}
+
+/// Com pin: headers de limite do upstream como `x-openkax-upstream-<nome>`.
+fn add_upstream_headers(resp: &mut Response, limit_headers: &[(String, String)]) {
+    for (k, v) in limit_headers {
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(format!("x-openkax-upstream-{k}").as_bytes()),
+            HeaderValue::from_str(v),
+        ) {
+            resp.headers_mut().insert(name, value);
+        }
+    }
+}
+
 /// Repassa o erro de request do upstream (JSON se for JSON; senão embrulha).
 fn upstream_fault_response(status: StatusCode, message: &str) -> Response {
     match serde_json::from_str::<Value>(message) {
@@ -383,10 +549,14 @@ struct Relay {
 }
 
 impl Relay {
-    /// Contabiliza e decide se o chunk vai ao cliente.
-    fn observe(&mut self, chunk: &ChatCompletionChunk) -> bool {
+    /// Contabiliza, remove raciocínio (N4) e decide se o chunk vai ao cliente.
+    fn observe(&mut self, chunk: &mut ChatCompletionChunk) -> bool {
+        let reasoning = provider::strip_reasoning(chunk);
+        if reasoning > 0 {
+            self.meta.reasoning = true;
+        }
         if let Some(r) = &mut self.res {
-            r.add_output_chars(output_chars(chunk));
+            r.add_output_chars(output_chars(chunk) + reasoning);
         }
         if chunk.usage.is_some() {
             self.usage = chunk.usage;
@@ -394,7 +564,7 @@ impl Relay {
         if !chunk.id.is_empty() {
             self.last = (chunk.id.clone(), chunk.created, chunk.model.clone());
         }
-        !chunk.choices.is_empty() || self.forward_usage
+        !provider::is_empty_chunk(chunk) && (!chunk.choices.is_empty() || self.forward_usage)
     }
 
     fn finish_ok(&mut self) {
@@ -448,15 +618,15 @@ impl Relay {
             if self.finished {
                 return None;
             }
-            if let Some(c) = self.prelude.pop_front() {
-                if self.observe(&c) {
+            if let Some(mut c) = self.prelude.pop_front() {
+                if self.observe(&mut c) {
                     return Some(sse_bytes(&c));
                 }
                 continue;
             }
             match self.rest.next().await {
-                Some(Ok(c)) => {
-                    if self.observe(&c) {
+                Some(Ok(mut c)) => {
+                    if self.observe(&mut c) {
                         return Some(sse_bytes(&c));
                     }
                 }
@@ -559,14 +729,14 @@ async fn aggregate_response(
     let mut finish_reason: Option<String> = None;
     let mut chunks = Vec::new();
     loop {
-        if let Some(c) = relay.prelude.pop_front() {
-            relay.observe(&c);
+        if let Some(mut c) = relay.prelude.pop_front() {
+            relay.observe(&mut c);
             chunks.push(c);
             continue;
         }
         match relay.rest.next().await {
-            Some(Ok(c)) => {
-                relay.observe(&c);
+            Some(Ok(mut c)) => {
+                relay.observe(&mut c);
                 chunks.push(c);
             }
             None => {

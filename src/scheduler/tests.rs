@@ -652,3 +652,183 @@ fn missing_key_and_disabled_provider_are_skipped() {
     assert_eq!(&*p.candidates[0].provider_id, "ok");
     assert_eq!(&*p.candidates[0].upstream_model, "m");
 }
+
+// ---------------------------------------------------------------- N2: max_concurrent
+
+#[test]
+fn max_concurrent_blocks_until_reservation_closes() {
+    let f = fx(&single("", ", limits = { max_concurrent = 1 }"));
+    let r1 = f.reserve(10);
+    assert_eq!(f.snap_model("p", "m").in_flight, 1);
+    // slot ocupado: não cabe agora (sem request ao provider)
+    assert!(matches!(f.skip(&req(10)), Skip::NotNow { .. }));
+    let c = f.only_after_drop(r1);
+    // settle solta o slot
+    let r2 = f.s.reserve(&c).unwrap();
+    assert!(matches!(f.skip(&req(10)), Skip::NotNow { .. }));
+    r2.settle(None);
+    // fail solta o slot
+    let r3 = f.reserve(10);
+    r3.fail(&UpstreamError::RequestFault {
+        status: 400,
+        message: String::new(),
+    });
+    // drop pós-1º-token solta o slot
+    let mut r4 = f.reserve(10);
+    r4.first_token();
+    drop(r4);
+    assert_eq!(f.snap_model("p", "m").in_flight, 0);
+    f.only(&req(10));
+}
+
+#[test]
+fn max_concurrent_at_provider_scope_is_shared_by_models() {
+    let f = fx(r#"
+        [[provider]]
+        id = "p"
+        base_url = "http://p"
+        auth = { kind = "none" }
+        limits = { max_concurrent = 1 }
+        models = [{ id = "a", upstream = "a" }, { id = "b", upstream = "b" }]
+
+        [[class]]
+        id = "kax/t"
+        max_packet_tokens = 100000
+        route = [{ provider = "p", model = "a" }, { provider = "p", model = "b" }]
+    "#);
+    let p = f.pick(&req(10));
+    let _held = f.s.reserve(&p.candidates[0]).unwrap();
+    let p = f.pick(&req(10));
+    assert!(p.candidates.is_empty(), "{p:?}");
+    assert_eq!(f.snap_provider("p").in_flight, 1);
+}
+
+// ---------------------------------------------------------------- N1: env ausente
+
+#[test]
+fn missing_env_in_base_url_disables_provider_with_names() {
+    let f = fx(r#"
+        [[provider]]
+        id = "cf"
+        base_url = "https://api/${MISSING}/v1"
+        auth = { kind = "none" }
+        models = [{ id = "m", upstream = "m" }]
+
+        [[class]]
+        id = "kax/t"
+        max_packet_tokens = 100000
+        route = [{ provider = "cf", model = "m" }]
+    "#);
+    assert_eq!(f.skip(&req(10)), Skip::Disabled(DisabledReason::MissingEnv));
+    let q = f.snap_provider("cf");
+    assert_eq!(q.missing_env, vec!["MISSING".to_owned()]);
+    assert_eq!(
+        q.state,
+        StateView::Disabled {
+            reason: DisabledReason::MissingEnv
+        }
+    );
+}
+
+// ---------------------------------------------------------------- N3/N5: tier e família
+
+#[test]
+fn quota_exposes_tier_and_family() {
+    let f = fx(&single("tier = \"credit\"", ", family = \"glm\""));
+    assert_eq!(f.snap_provider("p").tier, crate::config::Tier::Credit);
+    assert_eq!(f.snap_model("p", "m").family.as_deref(), Some("glm"));
+}
+
+#[test]
+fn exclude_family_filters_candidates_without_retry_hint() {
+    let f = fx(r#"
+        [[provider]]
+        id = "p"
+        base_url = "http://p"
+        auth = { kind = "none" }
+        models = [{ id = "a", upstream = "a", family = "glm" }, { id = "b", upstream = "b", family = "qwen" }, { id = "c", upstream = "c" }]
+
+        [[class]]
+        id = "kax/t"
+        max_packet_tokens = 100000
+        route = [{ provider = "p", model = "a" }, { provider = "p", model = "b" }, { provider = "p", model = "c" }]
+    "#);
+    let opts = PickOptions {
+        exclude_families: vec!["GLM".into(), "qwen".into()],
+    };
+    let p = f.s.pick_with("kax/t", &req(10), &opts).unwrap();
+    assert_eq!(p.skipped, vec![(0, Skip::Excluded), (1, Skip::Excluded)]);
+    assert_eq!(&*p.candidates[0].model_id, "c");
+    assert_eq!(p.retry_after(), None);
+}
+
+// ---------------------------------------------------------------- pin (F0-14)
+
+#[test]
+fn pin_targets_any_model_and_refuses_disabled() {
+    let f = fx(r#"
+        [[provider]]
+        id = "p"
+        base_url = "http://p"
+        auth = { kind = "none" }
+        models = [{ id = "a", upstream = "a" }, { id = "fora", upstream = "f" }]
+
+        [[provider]]
+        id = "off"
+        base_url = "http://o"
+        auth = { kind = "none" }
+        enabled = false
+        models = [{ id = "m" }]
+
+        [[class]]
+        id = "kax/t"
+        max_packet_tokens = 100000
+        route = [{ provider = "p", model = "a" }]
+    "#);
+    // modelo fora da rota da classe
+    let p = f.s.pick_pinned("kax/t", "p", "fora", &req(10)).unwrap();
+    assert_eq!(&*p.candidates[0].upstream_model, "f");
+    assert_eq!(
+        f.s.pick_pinned("kax/t", "off", "m", &req(10)),
+        Err(PinError::Disabled(DisabledReason::ConfigDisabled))
+    );
+    assert_eq!(
+        f.s.pick_pinned("kax/t", "p", "nope", &req(10)),
+        Err(PinError::UnknownTarget)
+    );
+    assert_eq!(
+        f.s.pick_pinned("kax/nope", "p", "a", &req(10)),
+        Err(PinError::Pick(PickError::UnknownClass("kax/nope".into())))
+    );
+}
+
+// ---------------------------------------------------------------- headers x-ratelimit-*
+
+#[test]
+fn observed_remaining_corrects_owning_scope() {
+    let f = fx(&single(
+        "limits = { rpm = 100 }",
+        ", limits = { rpd = 20, tpd = 200000 }",
+    ));
+    let r = f.reserve(10);
+    r.observe_remaining(&Remaining {
+        rpm: Some(7),
+        tpm: None,
+        rpd: Some(3),
+        tpd: Some(150_000),
+    });
+    r.settle(None);
+    // rpm é do provider; rpd/tpd são do modelo.
+    assert_eq!(f.snap_provider("p").rpm_remaining, Some(7));
+    let m = f.snap_model("p", "m");
+    assert_eq!(m.rpd_remaining, Some(3));
+    // settle depois da observação: o estimado (10) já está contido no header.
+    assert_eq!(m.tpd_remaining, Some(150_000));
+}
+
+impl Fx {
+    fn only_after_drop(&self, r: Reservation) -> Candidate {
+        drop(r);
+        self.only(&req(10))
+    }
+}

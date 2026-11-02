@@ -320,3 +320,175 @@ async fn request_fault_tries_one_extra_candidate_then_returns_to_client() {
     b.verify().await;
     c.verify().await;
 }
+
+/// N2: `max_concurrent = 1` no modelo; 2 requests simultâneas → a 2ª vai para o
+/// próximo candidato sem request ao 1º.
+#[tokio::test]
+async fn max_concurrent_sends_second_request_to_next_candidate() {
+    let (groq, gemini) = mocks().await;
+    upstream("k-groq", "qwen-coder")
+        .respond_with(sse_ok("from-groq").set_delay(Duration::from_millis(800)))
+        .expect(1)
+        .mount(&groq)
+        .await;
+    upstream("k-gemini", "gemini-flash")
+        .respond_with(sse_ok("from-gemini"))
+        .expect(1)
+        .mount(&gemini)
+        .await;
+    let toml = two_provider_config(&groq.uri(), &gemini.uri())
+        .replace(
+            "first_token_timeout_ms = 300",
+            "first_token_timeout_ms = 3000",
+        )
+        .replace(
+            "limits = { rpm = 30, tpm = 8000 }",
+            "limits = { rpm = 30, tpm = 8000, max_concurrent = 1 }",
+        );
+    let gw = std::sync::Arc::new(Gateway::spawn(&toml, SECRETS).await);
+
+    let g1 = gw.clone();
+    let first = tokio::spawn(async move { g1.chat_stream("kax/coder-fast", "oi").await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let second = gw.chat_stream("kax/coder-fast", "oi").await;
+    let first = first.await.unwrap();
+
+    assert_eq!(first.provider.as_deref(), Some("groq"), "{first:?}");
+    assert_eq!(first.sse.content(), "from-groq");
+    assert_eq!(second.provider.as_deref(), Some("gemini"), "{second:?}");
+    assert_eq!(second.sse.content(), "from-gemini");
+
+    groq.verify().await;
+    gemini.verify().await;
+}
+
+/// N4: deltas de raciocínio não chegam ao cliente e não fazem commit.
+#[tokio::test]
+async fn reasoning_deltas_are_not_forwarded() {
+    let (groq, gemini) = mocks().await;
+    let body = [
+        chunk(
+            json!({ "role": "assistant", "reasoning_content": "pensando..." }),
+            None,
+        ),
+        chunk(
+            json!({ "content": "hi", "reasoning_content": "mais" }),
+            None,
+        ),
+        chunk(json!({ "reasoning": "fim" }), None),
+        chunk(json!({}), Some("stop")),
+        "data: [DONE]\n\n".to_owned(),
+    ]
+    .concat();
+    upstream("k-groq", "qwen-coder")
+        .respond_with(sse_raw(body))
+        .expect(1)
+        .mount(&groq)
+        .await;
+    let gw = Gateway::spawn(&two_provider_config(&groq.uri(), &gemini.uri()), SECRETS).await;
+
+    let r = gw.chat_stream("kax/coder-fast", "oi").await;
+    assert_eq!(r.provider.as_deref(), Some("groq"));
+    assert_eq!(r.sse.content(), "hi");
+    for c in &r.sse.chunks {
+        let s = c.to_string();
+        assert!(!s.contains("reasoning"), "vazou raciocínio: {s}");
+    }
+    assert!(r.sse.done);
+    groq.verify().await;
+}
+
+/// N4: raciocínio seguido de EOF ainda é "antes do 1º token" → fallback.
+#[tokio::test]
+async fn reasoning_then_eof_falls_back() {
+    let (groq, gemini) = mocks().await;
+    let body = chunk(json!({ "reasoning_content": "hmm" }), None);
+    upstream("k-groq", "qwen-coder")
+        .respond_with(sse_raw(body))
+        .expect(1)
+        .mount(&groq)
+        .await;
+    upstream("k-gemini", "gemini-flash")
+        .respond_with(sse_ok("from-gemini"))
+        .expect(1)
+        .mount(&gemini)
+        .await;
+    let gw = Gateway::spawn(&two_provider_config(&groq.uri(), &gemini.uri()), SECRETS).await;
+
+    let r = gw.chat_stream("kax/coder-fast", "oi").await;
+    assert_eq!(r.provider.as_deref(), Some("gemini"), "{r:?}");
+    assert_eq!(r.sse.content(), "from-gemini");
+    groq.verify().await;
+    gemini.verify().await;
+}
+
+/// N5: `x-openkax-exclude-family` tira a família da rota; pin fixa o candidato.
+#[tokio::test]
+async fn exclude_family_header_and_pin() {
+    let (groq, gemini) = mocks().await;
+    upstream("k-groq", "qwen-coder")
+        .respond_with(sse_ok("from-groq"))
+        .expect(0)
+        .mount(&groq)
+        .await;
+    upstream("k-gemini", "gemini-flash")
+        .respond_with(sse_ok("from-gemini"))
+        .expect(2)
+        .mount(&gemini)
+        .await;
+    let toml = two_provider_config(&groq.uri(), &gemini.uri()).replace(
+        "upstream = \"qwen-coder\",",
+        "upstream = \"qwen-coder\", family = \"qwen\",",
+    );
+    let gw = Gateway::spawn(&toml, SECRETS).await;
+    let post = |hdr: (&'static str, &'static str)| {
+        gw.http
+            .post(format!("{}/v1/chat/completions", gw.base))
+            .header(hdr.0, hdr.1)
+            .json(&json!({ "model": "kax/coder-fast", "stream": true, "messages": [{ "role": "user", "content": "oi" }] }))
+            .send()
+    };
+    let r = post(("x-openkax-exclude-family", "qwen")).await.unwrap();
+    assert_eq!(r.headers()["x-openkax-provider"], "gemini");
+    r.text().await.unwrap();
+
+    let r = post(("x-openkax-pin", "gemini/gemini-flash"))
+        .await
+        .unwrap();
+    assert_eq!(r.headers()["x-openkax-provider"], "gemini");
+    r.text().await.unwrap();
+
+    let r = post(("x-openkax-pin", "groq/nao-existe")).await.unwrap();
+    assert_eq!(r.status(), 404);
+
+    groq.verify().await;
+    gemini.verify().await;
+}
+
+/// Pin em modelo desabilitado → 409 com o motivo.
+#[tokio::test]
+async fn pin_to_disabled_model_is_409() {
+    let (groq, gemini) = mocks().await;
+    let gw = Gateway::spawn(
+        &two_provider_config(&groq.uri(), &gemini.uri()),
+        &[("GEMINI_API_KEY", "k-gemini")], // groq sem chave → missing_key
+    )
+    .await;
+    let r = gw
+        .http
+        .post(format!("{}/v1/chat/completions", gw.base))
+        .header("x-openkax-pin", "groq/qwen-coder")
+        .json(&json!({ "model": "kax/coder-fast", "messages": [{ "role": "user", "content": "oi" }] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409);
+    let v: serde_json::Value = r.json().await.unwrap();
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("missing_key"),
+        "{v}"
+    );
+}

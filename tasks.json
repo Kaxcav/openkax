@@ -87,6 +87,18 @@
       "id": "F0-14",
       "title": "Smoke test real por provider (1 request curta) antes do aceite com Continue/Cline",
       "owner": "lead",
+      "status": "in_progress"
+    },
+    {
+      "id": "F0-15",
+      "title": "Providers de cauda (nvidia, vercel, zai, cloudflare, cohere, sambanova) + N1–N6 + pin (pedido como 'F0-12'; ADR 0004)",
+      "owner": "lead",
+      "status": "done"
+    },
+    {
+      "id": "F0-16",
+      "title": "Preencher VERCEL_AI_GATEWAY_KEY e CLOUDFLARE_API_TOKEN no .env; habilitar cloudflare com IDs conferidos",
+      "owner": "user",
       "status": "todo"
     }
   ]

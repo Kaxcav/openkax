@@ -36,6 +36,9 @@ pub struct Defaults {
     pub request_timeout_ms: u64,
     /// Teto até o primeiro delta de conteúdo; estourou → próximo candidato.
     pub first_token_timeout_ms: u64,
+    /// Teto estendido quando o upstream manda deltas de raciocínio antes do
+    /// conteúdo (sinal de vida, não commit) — N4.
+    pub first_token_timeout_reasoning_ms: u64,
     /// Chute inicial de chars/token (recalibrado por provider via `usage`).
     pub estimate_chars_per_token: f64,
     /// Multiplicador sobre a estimativa de tokens antes de checar buckets.
@@ -49,6 +52,7 @@ impl Default for Defaults {
         Self {
             request_timeout_ms: 60_000,
             first_token_timeout_ms: 8_000,
+            first_token_timeout_reasoning_ms: 30_000,
             estimate_chars_per_token: 3.6,
             safety_factor: 1.0,
             daily_reset_utc: UtcTime::MIDNIGHT,
@@ -78,9 +82,9 @@ pub struct Provider {
     pub cooldown: Option<Cooldown>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra_headers: BTreeMap<String, String>,
-    /// Degrau pago: sempre depois dos gratuitos em qualquer rota.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub paid: bool,
+    /// `free` → `credit` → `paid`: ordem obrigatória em qualquer rota (N3).
+    #[serde(default, skip_serializing_if = "Tier::is_free")]
+    pub tier: Tier,
     /// Protocolo nativo; ausente = OpenAI Chat Completions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native: Option<Native>,
@@ -97,6 +101,116 @@ impl Provider {
 
     pub fn model(&self, id: &str) -> Option<&Model> {
         self.models.iter().find(|m| m.id == id)
+    }
+
+    /// Variáveis `${VAR}` referenciadas em `base_url` e `extra_headers` (N1).
+    pub fn env_refs(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for s in std::iter::once(&self.base_url).chain(self.extra_headers.values()) {
+            for r in env_refs(s).unwrap_or_default() {
+                if !out.contains(&r) {
+                    out.push(r);
+                }
+            }
+        }
+        out
+    }
+
+    /// Cópia com `${VAR}` resolvidas. `Err` lista as variáveis ausentes.
+    pub fn resolve_env(
+        &self,
+        lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self, Vec<String>> {
+        let mut missing: Vec<String> = Vec::new();
+        let mut sub = |s: &str| match interpolate(s, lookup) {
+            Ok(v) => v,
+            Err(m) => {
+                for v in m {
+                    if !missing.contains(&v) {
+                        missing.push(v);
+                    }
+                }
+                String::new()
+            }
+        };
+        let mut p = self.clone();
+        p.base_url = sub(&self.base_url);
+        for v in p.extra_headers.values_mut() {
+            *v = sub(v);
+        }
+        if missing.is_empty() {
+            Ok(p)
+        } else {
+            Err(missing)
+        }
+    }
+}
+
+/// Nomes em `${VAR}` de `s`. `Err` = sintaxe inválida (`${` sem `}` ou nome inválido).
+pub fn env_refs(s: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(i) = rest.find("${") {
+        let after = &rest[i + 2..];
+        let Some(end) = after.find('}') else {
+            return Err(format!("`${{` sem `}}` em {s:?}"));
+        };
+        let name = &after[..end];
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(format!("nome de variável inválido {name:?} em {s:?}"));
+        }
+        out.push(name.to_owned());
+        rest = &after[end + 1..];
+    }
+    Ok(out)
+}
+
+/// Substitui `${VAR}` por `lookup(VAR)`. `Err` lista as ausentes.
+pub fn interpolate(
+    s: &str,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, Vec<String>> {
+    let refs = env_refs(s).map_err(|e| vec![e])?;
+    let mut out = s.to_owned();
+    let mut missing = Vec::new();
+    for name in refs {
+        match lookup(&name) {
+            Some(v) => out = out.replace(&format!("${{{name}}}"), &v),
+            None => missing.push(name),
+        }
+    }
+    if missing.is_empty() {
+        Ok(out)
+    } else {
+        Err(missing)
+    }
+}
+
+/// Natureza do custo de um provider.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Tier {
+    #[default]
+    Free,
+    /// Créditos gratuitos que acabam (Vercel AI Gateway).
+    Credit,
+    /// Cobra dinheiro (DeepSeek).
+    Paid,
+}
+
+impl Tier {
+    pub fn is_free(&self) -> bool {
+        *self == Self::Free
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Free => "free",
+            Self::Credit => "credit",
+            Self::Paid => "paid",
+        }
     }
 }
 
@@ -115,6 +229,9 @@ pub struct Model {
     /// Sobrescreve `provider.limits.max_ctx`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_ctx: Option<u32>,
+    /// Família do modelo ("glm", "qwen", …): filtro `x-openkax-exclude-family` (N5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
 }
 
 /// Como autenticar no upstream. A chave em si nunca está no TOML: só o nome
@@ -151,9 +268,15 @@ pub struct Limits {
     /// Só no escopo do provider; no modelo use `models[].max_ctx`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_ctx: Option<u32>,
-    /// Informativo na Fase 0 (sem persistência, contador mensal não faz sentido).
+    /// Requests simultâneas no escopo (N2): slot tomado no `reserve`, solto ao fechar a reserva.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent: Option<u32>,
+    /// Informativo até o snapshot da F0-10 (N6); até lá o pacing é via `rpd`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens_per_month: Option<u64>,
+    /// Informativo até o snapshot da F0-10 (N6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requests_per_month: Option<u64>,
     /// Sobrescreve o horário de reset de RPD/TPD deste escopo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset_utc: Option<UtcTime>,
@@ -170,7 +293,7 @@ impl Limits {
 }
 
 /// Diferenças de comportamento do provider tratadas como dado.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Quirks {
     /// Parâmetros removidos do corpo antes de enviar.
@@ -187,6 +310,33 @@ pub struct Quirks {
     /// Teto de `max_tokens` enviado ao upstream (clamp).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens_cap: Option<u32>,
+    /// Fragmento mesclado no corpo para desligar raciocínio — só parâmetro
+    /// documentado pelo provider (N4). Ex.: `{ thinking = { type = "disabled" } }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_thinking: Option<toml::Table>,
+    /// Headers de resposta com o saldo restante de cada bucket; corrigem o bucket.
+    #[serde(default, skip_serializing_if = "RateLimitHeaders::is_empty")]
+    pub ratelimit_headers: RateLimitHeaders,
+}
+
+/// Nome do header com o saldo **restante** de cada bucket.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitHeaders {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpm: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tpm: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tpd: Option<String>,
+}
+
+impl RateLimitHeaders {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 impl Quirks {
@@ -360,6 +510,12 @@ impl Config {
         if d.safety_factor.is_nan() || d.safety_factor < 1.0 {
             errs.push("defaults.safety_factor deve ser >= 1.0".to_owned());
         }
+        if d.first_token_timeout_reasoning_ms < d.first_token_timeout_ms {
+            errs.push(
+                "defaults: first_token_timeout_reasoning_ms deve ser >= first_token_timeout_ms"
+                    .to_owned(),
+            );
+        }
         if d.first_token_timeout_ms == 0 || d.request_timeout_ms < d.first_token_timeout_ms {
             errs.push(
                 "defaults: exige 0 < first_token_timeout_ms <= request_timeout_ms".to_owned(),
@@ -385,7 +541,7 @@ impl Config {
             if c.route.is_empty() {
                 errs.push(format!("classe {:?}: route vazia", c.id));
             }
-            let mut seen_paid = false;
+            let mut max_tier = Tier::Free;
             for (i, step) in c.route.iter().enumerate() {
                 let Some(p) = self.provider(&step.provider) else {
                     errs.push(format!(
@@ -407,14 +563,16 @@ impl Config {
                         c.id
                     ));
                 }
-                if p.paid {
-                    seen_paid = true;
-                } else if seen_paid {
+                if p.tier < max_tier {
                     errs.push(format!(
-                        "classe {:?}: degrau gratuito {:?} depois de um pago (pago sempre por último)",
-                        c.id, p.id
+                        "classe {:?}: degrau {:?} ({}) depois de um {} (pago/crédito sempre no fim)",
+                        c.id,
+                        p.id,
+                        p.tier.as_str(),
+                        max_tier.as_str()
                     ));
                 }
+                max_tier = max_tier.max(p.tier);
             }
         }
 
@@ -448,6 +606,13 @@ fn validate_provider(p: &Provider, errs: &mut Vec<String>) {
         errs.push(format!("provider {id:?}: quirks.max_tokens_cap = 0"));
     }
     validate_limits(&p.limits, &format!("provider {id:?}: limits"), errs);
+    for (what, v) in std::iter::once(("base_url", &p.base_url))
+        .chain(p.extra_headers.iter().map(|(k, v)| (k.as_str(), v)))
+    {
+        if let Err(e) = env_refs(v) {
+            errs.push(format!("provider {id:?}: {what}: {e}"));
+        }
+    }
 
     let mut model_ids = HashSet::new();
     for m in &p.models {
@@ -479,6 +644,7 @@ fn validate_limits(l: &Limits, at: &str, errs: &mut Vec<String>) {
         ("rpd", l.rpd.map(u64::from)),
         ("tpd", l.tpd),
         ("max_ctx", l.max_ctx.map(u64::from)),
+        ("max_concurrent", l.max_concurrent.map(u64::from)),
     ];
     for (name, v) in zero {
         if v == Some(0) {
@@ -554,7 +720,15 @@ mod tests {
             Some("OpenKax")
         );
         assert!(c.provider("github").is_some());
-        assert!(c.provider("deepseek").unwrap().paid);
+        assert_eq!(c.provider("deepseek").unwrap().tier, Tier::Paid);
+        assert_eq!(c.provider("vercel").unwrap().tier, Tier::Credit);
+        let cf = c.provider("cloudflare").unwrap();
+        assert_eq!(cf.env_refs(), ["CLOUDFLARE_ACCOUNT_ID"]);
+        for p in c.providers.iter().filter(|p| p.native.is_none()) {
+            for m in &p.models {
+                assert!(m.family.is_some(), "{}/{} sem family", p.id, m.id);
+            }
+        }
         let anth = c.provider("anthropic").unwrap();
         assert_eq!(
             (anth.auth.clone(), anth.native),
@@ -583,7 +757,17 @@ mod tests {
             .collect();
         assert_eq!(
             smart,
-            ["gemini", "mistral", "github", "openrouter", "deepseek"]
+            [
+                "gemini",
+                "nvidia",
+                "mistral",
+                "zai",
+                "github",
+                "sambanova",
+                "openrouter",
+                "vercel",
+                "deepseek"
+            ]
         );
     }
 
@@ -699,7 +883,7 @@ mod tests {
             id = "paid"
             base_url = "http://p"
             auth = { kind = "none" }
-            paid = true
+            tier = "credit"
             models = [{ id = "m", upstream = "u" }]
 
             [[provider]]
@@ -715,7 +899,97 @@ mod tests {
             "#,
         );
         assert!(
-            errs.iter().any(|e| e.contains("pago sempre por último")),
+            errs.iter()
+                .any(|e| e.contains("pago/crédito sempre no fim")),
+            "{errs:?}"
+        );
+    }
+
+    /// N1: interpolação de `${VAR}`.
+    #[test]
+    fn interpolates_env_refs_and_reports_missing() {
+        let look = |k: &str| (k == "ACC").then(|| "abc123".to_owned());
+        assert_eq!(
+            interpolate("https://x/accounts/${ACC}/ai/v1", &look).unwrap(),
+            "https://x/accounts/abc123/ai/v1"
+        );
+        assert_eq!(
+            interpolate("sem vars $ e {}", &look).unwrap(),
+            "sem vars $ e {}"
+        );
+        assert_eq!(
+            interpolate("${ACC}-${NOPE}-${NOPE2}", &look),
+            Err(vec!["NOPE".to_owned(), "NOPE2".to_owned()])
+        );
+        assert!(env_refs("https://x/${ABERTO").is_err());
+        assert!(env_refs("https://x/${}").is_err());
+        assert!(env_refs("https://x/${A-B}").is_err());
+    }
+
+    #[test]
+    fn provider_resolve_env_covers_base_url_and_headers() {
+        let c = Config::from_toml_str(
+            r#"
+            [[provider]]
+            id = "cf"
+            base_url = "https://api/${ACC}/v1"
+            auth = { kind = "none" }
+            extra_headers = { "X-Org" = "${ORG}", "X-Fixo" = "a" }
+            models = [{ id = "m", upstream = "m" }]
+            "#,
+        )
+        .unwrap();
+        let p = &c.providers[0];
+        assert_eq!(p.env_refs(), ["ACC", "ORG"]);
+        let all = |k: &str| Some(format!("<{k}>"));
+        let r = p.resolve_env(&all).unwrap();
+        assert_eq!(r.base_url, "https://api/<ACC>/v1");
+        assert_eq!(r.extra_headers["X-Org"], "<ORG>");
+        assert_eq!(r.extra_headers["X-Fixo"], "a");
+        let only_acc = |k: &str| (k == "ACC").then(|| "1".to_owned());
+        assert_eq!(p.resolve_env(&only_acc), Err(vec!["ORG".to_owned()]));
+    }
+
+    #[test]
+    fn rejects_bad_env_ref_syntax() {
+        let errs = invalid(
+            r#"
+            [[provider]]
+            id = "cf"
+            base_url = "https://api/${ACC/v1"
+            auth = { kind = "none" }
+            "#,
+        );
+        assert!(errs.iter().any(|e| e.contains("sem `}`")), "{errs:?}");
+    }
+
+    #[test]
+    fn tier_order_free_credit_paid() {
+        let errs = invalid(
+            r#"
+            [[provider]]
+            id = "pago"
+            base_url = "http://p"
+            auth = { kind = "none" }
+            tier = "paid"
+            models = [{ id = "m", upstream = "u" }]
+
+            [[provider]]
+            id = "cred"
+            base_url = "http://c"
+            auth = { kind = "none" }
+            tier = "credit"
+            models = [{ id = "m", upstream = "u" }]
+
+            [[class]]
+            id = "kax/x"
+            max_packet_tokens = 10
+            route = [{ provider = "pago", model = "m" }, { provider = "cred", model = "m" }]
+            "#,
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("\"cred\" (credit) depois de um paid")),
             "{errs:?}"
         );
     }
