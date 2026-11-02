@@ -146,6 +146,13 @@
       "owner": "lead",
       "status": "done",
       "note": "ADR 0002. Privada/WS em MiB, antes → depois: start 1,77/7,99 → 1,77/8,01; pós-5-req 4,07/14,80 → 4,07/14,78; +5 min 3,86/14,82 → 3,82/14,74. Diferença no ruído para requests sequenciais; .exe 3.086.848 B"
+    },
+    {
+      "id": "F2-1",
+      "title": "CONTRACT do MCP kax-workers: openkax mcp (rmcp stdio), 5 tools com schema, tipos serde, schema de .kax/verify.toml, ADR 0007 (proposta)",
+      "owner": "lead",
+      "status": "done",
+      "note": "101 unitários (+7: 4 types, 3 verify) + 3 de integração mcp_contract (+3 #[ignore] F2-3/F2-4/F2-5 falhando de propósito). Handlers validam e devolvem not_implemented; quota devolve o snapshot do scheduler"
     }
   ]
 }

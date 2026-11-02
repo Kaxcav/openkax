@@ -1,0 +1,16 @@
+# Copie para <repo>/.kax/verify.toml. Os comandos rodam SEMPRE dentro do
+# worktree da tarefa (nunca no repo do lead) e o primeiro que falhar encerra.
+
+timeout_s = 300        # por comando
+max_log_bytes = 4096   # teto do verify_log devolvido (o fim do log é preservado)
+
+[[language]]
+name = "rust"
+globs = ["**/*.rs", "Cargo.toml"]
+commands = ["cargo check --all-targets", "cargo clippy --all-targets -- -D warnings", "cargo test"]
+timeout_s = 900
+
+[[language]]
+name = "node"
+globs = ["**/*.ts", "**/*.js", "package.json"]
+commands = ["npm run lint", "npm test"]
