@@ -117,9 +117,9 @@
     },
     {
       "id": "F0-19",
-      "title": "Cohere command-a-plus: conteúdo começa com 'The user says…' mesmo com reasoning_effort=none — investigar",
+      "title": "Cohere: command-a-plus → command-a-03-2025 (sem raciocínio) + quirk ascii_json (UTF-8 cru degenerava); segue no kax/reviewer",
       "owner": "lead",
-      "status": "todo"
+      "status": "done"
     }
   ]
 }

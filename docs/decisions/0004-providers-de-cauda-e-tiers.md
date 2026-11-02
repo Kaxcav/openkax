@@ -27,7 +27,7 @@ IDs conferidos em `/models` em 2026-11-02 (Cohere pela API nativa `/v1/models`; 
 | vercel | `https://ai-gateway.vercel.sh/v1` | **credit** | modelo | a medir | só modelos com preço 0 em `/v1/models` |
 | zai | `https://api.z.ai/api/paas/v4` | free | modelo | 60 RPM, `max_concurrent = 1`, 128k | `disable_thinking = { thinking = { type = "disabled" } }` (documentado) |
 | cloudflare | `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/v1` | free | provider | 10k neurons/dia (sem bucket equivalente) | desligado até existir `CLOUDFLARE_API_TOKEN` |
-| cohere | `https://api.cohere.ai/compatibility/v1` | free (trial) | provider | 20 RPM, rpd 30, 1000/mês | `disable_thinking = { reasoning_effort = "none" }` (documentado) |
+| cohere | `https://api.cohere.ai/compatibility/v1` | free (trial) | provider | 20 RPM, rpd 30, 1000/mês | `command-a-03-2025` (sem raciocínio) + `ascii_json` — ver F0-19 |
 | sambanova | `https://api.sambanova.ai/v1` | free | modelo | 20 RPM, 20 RPD, 200k TPD | buckets corrigidos pelos headers `x-ratelimit-*` (nomes via smoke) |
 | deepseek | `https://api.deepseek.com/v1` | **paid** | provider | 60 RPM | — |
 
@@ -68,6 +68,12 @@ IDs conferidos em `/models` em 2026-11-02 (Cohere pela API nativa `/v1/models`; 
   - Fixa o candidato, até fora da rota, mas passa por gate, reserva e ledger.
   - Modelo desabilitado → 409 com o motivo.
   - A resposta traz os headers de limite do upstream como `x-openkax-upstream-<nome>`, numa lista branca: `x-ratelimit-*`, `ratelimit*`, `retry-after`, `x-request-limit*`.
+
+### F0-19 (2026-11-02) — Cohere
+
+- `command-a-plus-05-2026` tem a feature `reasoning` e vazava "The user says…" no `content` mesmo com `reasoning_effort = "none"`. Trocado por `command-a-03-2025`, o `command-a` sem `reasoning` em `/v1/models?endpoint=chat`. Sem raciocínio, sai a quirk `disable_thinking`.
+- No smoke apareceu outro defeito: prompt PT-BR em UTF-8 cru gerava saída degenerada (`W32{A+B}W32…` até o `max_tokens`) ou 422 `NO_VALID_RESPONSE_GENERATED` em 5 de 10 chamadas; o mesmo corpo com não-ASCII escapado (`\uXXXX`) deu 7/7 limpas direto e 5/5 pelo gateway. Quirk nova **`ascii_json`**: só muda a codificação do JSON (mesmo valor), nunca o texto. Nada de limpeza heurística de saída.
+- Sem vazamento de raciocínio com o modelo novo → a Cohere continua no `kax/reviewer`.
 
 ## Consequências
 

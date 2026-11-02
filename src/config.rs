@@ -335,6 +335,10 @@ pub struct Quirks {
     /// Headers de resposta com o saldo restante de cada bucket; corrigem o bucket.
     #[serde(default, skip_serializing_if = "RateLimitHeaders::is_empty")]
     pub ratelimit_headers: RateLimitHeaders,
+    /// Corpo enviado com todo não-ASCII escapado (`\uXXXX`): mesmo JSON, outra
+    /// codificação. Cohere degenera com UTF-8 cru (F0-19).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ascii_json: bool,
 }
 
 /// Nome do header com o saldo **restante** de cada bucket.
@@ -759,6 +763,17 @@ mod tests {
                 assert!(m.family.is_some(), "{}/{} sem family", p.id, m.id);
             }
         }
+        // F0-19: Cohere com modelo SEM raciocínio (sem features=reasoning em /models),
+        // logo sem quirk para desligá-lo.
+        let cohere = c.provider("cohere").unwrap();
+        assert_eq!(
+            cohere.model("command-a").unwrap().upstream.as_deref(),
+            Some("command-a-03-2025")
+        );
+        assert!(cohere.model("command-a-plus").is_none());
+        assert!(cohere.quirks.disable_thinking.is_none());
+        assert!(cohere.quirks.ascii_json);
+
         // F0-18: NVIDIA e gemini-flash demoram mais até o 1º token.
         for m in &c.provider("nvidia").unwrap().models {
             assert_eq!(m.first_token_timeout_ms, Some(20_000), "nvidia/{}", m.id);

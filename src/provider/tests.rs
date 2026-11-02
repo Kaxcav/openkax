@@ -236,6 +236,60 @@ fn upstream_body_without_stream_usage_quirk() {
     assert_eq!(b["max_tokens"], 10);
 }
 
+/// F0-19: `ascii_json` escapa todo não-ASCII como `\uXXXX` (par substituto fora
+/// do BMP); o JSON continua o mesmo valor.
+#[test]
+fn encode_body_ascii_json_escapes_non_ascii() {
+    let v = json!({ "messages": [{ "content": "Você é revisor ção 😀 \"x\"\n" }], "n": 1 });
+    let ascii = encode_body(&v, true);
+    assert!(ascii.is_ascii(), "{}", String::from_utf8_lossy(&ascii));
+    let s = String::from_utf8(ascii.clone()).unwrap();
+    assert!(s.contains("Voc\\u00ea"), "{s}");
+    assert!(s.contains("\\ud83d\\ude00"), "{s}");
+    assert_eq!(serde_json::from_slice::<Value>(&ascii).unwrap(), v);
+
+    let raw = encode_body(&v, false);
+    assert!(!raw.is_ascii());
+    assert_eq!(serde_json::from_slice::<Value>(&raw).unwrap(), v);
+}
+
+/// F0-19: com o quirk, o upstream recebe só bytes ASCII e `content-type: application/json`.
+#[tokio::test]
+async fn start_stream_sends_ascii_body_with_quirk() {
+    use wiremock::matchers::{header, method};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let sse = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    Mock::given(method("POST"))
+        .and(header("content-type", "application/json"))
+        .and(|r: &Request| r.body.is_ascii())
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut p = provider_from("quirks = { ascii_json = true }");
+    p.base_url = server.uri();
+    let mut req = request(json!({}));
+    req.messages[0].content = Some(crate::translate::openai::MessageContent::Text(
+        "Você é revisor".into(),
+    ));
+    let client = ProviderClient::new(build_http_client(Duration::from_secs(5)).unwrap());
+    let a = client
+        .start_stream(
+            &p,
+            None,
+            "real",
+            None,
+            &req,
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        )
+        .await;
+    assert!(a.result.is_ok(), "{:?}", a.result.err());
+    server.verify().await;
+}
+
 /// A5: com `rustls-no-provider`, construir o client sem provider instalado dá
 /// panic em runtime. `build_http_client` instala o `ring` antes.
 #[test]

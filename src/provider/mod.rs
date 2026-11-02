@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use reqwest::header::{ACCEPT, HeaderMap, RETRY_AFTER};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, RETRY_AFTER};
 use serde_json::Value;
 
 use crate::config::{Auth, Config};
@@ -184,7 +184,8 @@ impl ProviderClient {
             .http
             .post(url)
             .header(ACCEPT, "text/event-stream")
-            .json(&body);
+            .header(CONTENT_TYPE, "application/json")
+            .body(encode_body(&body, provider.quirks.ascii_json));
         if let Some(key) = api_key {
             rb = rb.bearer_auth(key);
         }
@@ -675,6 +676,28 @@ pub fn build_upstream_body(
         obj.remove(p);
     }
     v
+}
+
+/// Serializa o corpo upstream. `ascii` (quirk `ascii_json`): todo char não-ASCII
+/// vira `\uXXXX` (par substituto fora do BMP). Fora de strings o JSON do serde
+/// é ASCII puro, então escapar char a char preserva o valor.
+pub fn encode_body(body: &Value, ascii: bool) -> Vec<u8> {
+    let s = serde_json::to_string(body).unwrap_or_default();
+    if !ascii || s.is_ascii() {
+        return s.into_bytes();
+    }
+    let mut out = String::with_capacity(s.len() + 16);
+    for c in s.chars() {
+        if c.is_ascii() {
+            out.push(c);
+        } else {
+            let mut units = [0u16; 2];
+            for u in c.encode_utf16(&mut units) {
+                out.push_str(&format!("\\u{u:04x}"));
+            }
+        }
+    }
+    out.into_bytes()
 }
 
 /// rustls sem provider padrão (ADR 0002): instala `ring` uma vez por processo.

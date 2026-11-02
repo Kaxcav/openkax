@@ -146,12 +146,16 @@ id = "cohere"
 base_url = "https://api.cohere.ai/compatibility/v1"
 auth = { kind = "bearer", env = "COHERE_API_KEY" }
 # Trial: 20 RPM, 1000 chamadas/MÊS por chave → rpd = 30 espalha o mês (N6).
+# F0-19: command-a-plus (features: reasoning) vazava "The user says…" no content mesmo
+# com reasoning_effort=none. command-a-03-2025 não tem a feature `reasoning` em
+# /v1/models?endpoint=chat (2026-11-02), então não há raciocínio a desligar.
 models = [
-  { id = "command-a-plus", upstream = "command-a-plus-05-2026", max_ctx = 436000, family = "cohere" },
+  { id = "command-a", upstream = "command-a-03-2025", max_ctx = 288000, family = "cohere" },
 ]
 limits = { rpm = 20, rpd = 30, requests_per_month = 1000 }
-# Documentado (docs.cohere.com/docs/compatibility-api): reasoning_effort "none" desliga thinking.
-quirks = { disable_thinking = { reasoning_effort = "none" } }
+# Prompt PT-BR em UTF-8 cru → saída degenerada ("W32{A+B}W32…") em 5/10; com \uXXXX,
+# 0/7 (smoke 2026-11-02, mesma request). Só muda a codificação do JSON.
+quirks = { ascii_json = true }
 
 [[provider]]
 id = "cloudflare"
@@ -221,7 +225,7 @@ max_packet_tokens = 60000
 # mistral-medium tem 0 RPM no free tier (smoke): Mistral entra com codestral.
 route = [
   { provider = "mistral", model = "codestral" },
-  { provider = "cohere", model = "command-a-plus" },
+  { provider = "cohere", model = "command-a" },
   { provider = "zai", model = "glm-4.7-flash" },
   { provider = "nvidia", model = "deepseek-v4.1-flash" },
   { provider = "gemini", model = "gemini-flash" },
