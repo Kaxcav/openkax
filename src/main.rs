@@ -1,6 +1,6 @@
 //! Binário `openkax`.
 //!
-//! Uso: `openkax [serve]` (padrão) | `openkax mcp` (Fase 2) | `openkax doctor` (F5-1).
+//! Uso: `openkax [serve]` (padrão) | `openkax mcp` (Fase 2) | `openkax doctor` (F5-1) | `openkax report` (F5-2).
 //! Env: `OPENKAX_CONFIG` (default `./providers.toml`, recarregado ao mudar),
 //! `OPENKAX_BIND` (default `127.0.0.1:8000`), `OPENKAX_LOG` (filtro `tracing`,
 //! default `info`). Buckets persistem em `<state_dir>/buckets.json`.
@@ -37,8 +37,9 @@ fn main() -> ExitCode {
         Some("mcp") => run_mcp(),
         Some("clean") => run_clean(),
         Some("doctor") => run_doctor(),
+        Some("report") => run_report(),
         Some(other) => {
-            eprintln!("subcomando desconhecido: {other}\nuso: openkax [serve|mcp|clean|doctor]");
+            eprintln!("subcomando desconhecido: {other}\nuso: openkax [serve|mcp|clean|doctor|report]");
             ExitCode::from(2)
         }
     }
@@ -108,6 +109,51 @@ fn run_doctor() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// `openkax report [--day|--week|--since AAAA-MM-DD] [--json]`: agrega o ledger
+/// (padrão: `--week`).
+fn run_report() -> ExitCode {
+    use openkax::mcp::Period;
+    use openkax::report;
+    let usage = "uso: openkax report [--day|--week|--since AAAA-MM-DD] [--json]";
+    let mut since: Option<String> = None;
+    let mut json = false;
+    let now = std::time::SystemTime::now();
+    let mut args = std::env::args().skip(2);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--json" => json = true,
+            "--day" => since = Some(report::since_for_period(Period::Day, now)),
+            "--week" => since = Some(report::since_for_period(Period::Week, now)),
+            "--since" => match args.next().map(|d| report::parse_since_date(&d)) {
+                Some(Ok(d)) => since = Some(d),
+                Some(Err(e)) => {
+                    eprintln!("{e}
+{usage}");
+                    return ExitCode::from(2);
+                }
+                None => {
+                    eprintln!("--since exige AAAA-MM-DD
+{usage}");
+                    return ExitCode::from(2);
+                }
+            },
+            other => {
+                eprintln!("argumento desconhecido: {other}
+{usage}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    let since = since.unwrap_or_else(|| report::since_for_period(Period::Week, now));
+    let r = report::build(&platform::current().ledger_dir(), &since);
+    if json {
+        println!("{}", r.to_json());
+    } else {
+        print!("{}", r.to_text());
+    }
+    ExitCode::SUCCESS
 }
 
 /// `openkax clean [--repo <path>] [--all]`: remove worktrees de tarefas

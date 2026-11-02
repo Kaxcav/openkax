@@ -202,6 +202,13 @@
       "owner": "lead",
       "status": "done",
       "note": "src/doctor.rs + despacho em main.rs. 9 testes wiremock em tests/doctor_catalog.rs (JSON ok, text/plain FAIL, 401/403 FAIL, upstream ausente WARN, Cloudflare /ai/models/search, headers x-ratelimit/IETF + TTFT, chat FAIL, filtro/JSON sem vazar chave, chave ausente). 130 unitários + demais suítes verdes. Não rodado contra provider real; doctor.sh/doctor.ps1 mantidos (substituição gradual)"
+    },
+    {
+      "id": "F5-2",
+      "title": "openkax report (--day|--week|--since, --json): requests por classe e provider/modelo, tarefas com aceitação em 1ª passada",
+      "owner": "lead",
+      "status": "done",
+      "note": "src/report.rs + despacho em main.rs; tool MCP report passa a usar o módulo (src/mcp/report.rs removido; JSON agora tasks_by_class/tasks_by_provider/requests_by_*). 4 testes unitários novos (percentis, agregação com linhas malformadas, período vazio/dir ausente, --since) substituem os 2 de mcp/report; mcp_contract ajustado. 132 unitários + demais suítes verdes. Não rodado contra ledger real longo"
     }
   ]
 }

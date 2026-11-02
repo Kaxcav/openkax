@@ -8,7 +8,6 @@
 
 mod batch;
 mod packet;
-mod report;
 mod run;
 mod types;
 
@@ -25,7 +24,6 @@ use crate::server::AppState;
 
 pub use batch::Batches;
 pub use packet::*;
-pub use report::{Report, Tally};
 pub use run::run_task;
 pub use types::*;
 
@@ -126,7 +124,8 @@ impl KaxWorkers {
         let dir = self.ledger_dir.clone().unwrap_or_default();
         let period = p.period;
         let report = tokio::task::spawn_blocking(move || {
-            report::build(&dir, period, std::time::SystemTime::now())
+            let since = crate::report::since_for_period(period, std::time::SystemTime::now());
+            crate::report::build(&dir, &since)
         })
         .await
         .map_err(|e| tool_error("internal", &e.to_string()))?;
