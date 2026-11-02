@@ -1,0 +1,24 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Segredos — NUNCA commitar
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Estado local do OpenKax (dev)
+/.kax/wt/
+/.kax/state/
+/ledger/
+*.jsonl
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
