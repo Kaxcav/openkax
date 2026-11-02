@@ -20,6 +20,17 @@ O produto final continua sendo um binário Windows leve (< 8 MB, RSS < 10 MB), m
 4. **O `.exe` de release é construído por GitHub Actions** (`windows-latest`, MSVC) e opcionalmente no PC de casa. O notebook nunca constrói nem executa o `.exe`. Os critérios "binário < 8 MB / RSS < 10 MB" são medidos no artefato do CI e no PC de casa.
 5. Cross-compile de WSL para `x86_64-pc-windows-gnu` fica como opção de conveniência, não como caminho oficial de release.
 
+## Adendo (2026-11-02) — PC de casa como segundo ambiente de dev
+
+O PC de casa (`kaxcavmaster`) passa a ser ambiente de dev **nativo Windows**: sem WDAC, sem VPN, repo em `D:\dev\openkax`, PowerShell e Git Bash permitidos, toolchain MSVC. Ali:
+
+- `cargo test` e `cargo clippy --all-targets -- -D warnings` rodam no Windows e precisam passar como no Linux. Testes que dependem de caminho absoluto usam uma base portátil (`current_dir()`), não `/x/...`.
+- O `.exe` roda localmente (`127.0.0.1:8000`): é onde se medem tamanho, RSS ocioso e o smoke por classe antes do CI.
+- `WindowsPlatform` usa `%LOCALAPPDATA%\OpenKax` (cai em `%USERPROFILE%\AppData\Local\OpenKax` se a variável faltar ou for relativa) para config, `ledger\`, `state\` e `logs\`.
+- Rede doméstica sem proxy: é daqui que se conferem os catálogos que a rede do notebook bloqueia (Groq, GitHub Models).
+
+O **CI continua sendo a fonte do `.exe` de release**; o build local serve para medir e testar. O notebook segue só com WSL/bash.
+
 ## Consequências
 
 - Ganha-se um binário Linux de graça (útil para servidores/Railway no futuro).

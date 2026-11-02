@@ -1,8 +1,8 @@
 //! Integração com o SO atrás do trait [`Platform`] (ADR 0001).
 //!
 //! Único lugar onde `#[cfg(windows)]` é permitido. Linux usa XDG
-//! (`$XDG_DATA_HOME/openkax`, `$XDG_CONFIG_HOME/openkax`); Windows usará
-//! `%LOCALAPPDATA%\OpenKax` (implementação junto com o workflow de CI).
+//! (`$XDG_DATA_HOME/openkax`, `$XDG_CONFIG_HOME/openkax`); Windows usa
+//! `%LOCALAPPDATA%\OpenKax` para tudo (config, ledger, estado, logs).
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -20,6 +20,11 @@ pub trait Platform: Send + Sync {
     /// Snapshots JSON dos buckets.
     fn state_dir(&self) -> PathBuf {
         self.data_dir().join("state")
+    }
+
+    /// Logs em arquivo (`tracing-appender`).
+    fn logs_dir(&self) -> PathBuf {
+        self.data_dir().join("logs")
     }
 }
 
@@ -71,16 +76,58 @@ impl Platform for UnixPlatform {
     }
 }
 
+/// Windows: tudo sob `%LOCALAPPDATA%\OpenKax`. A resolução é pura e compila em
+/// qualquer SO, para os testes rodarem também no Linux.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsPlatform {
+    root: PathBuf,
+}
+
+impl WindowsPlatform {
+    pub fn from_env() -> Self {
+        Self::from_vars(
+            std::env::var_os("LOCALAPPDATA"),
+            std::env::var_os("USERPROFILE"),
+        )
+    }
+
+    /// `LOCALAPPDATA` vazio ou relativo é ignorado; cai em `%USERPROFILE%\AppData\Local`.
+    pub fn from_vars(local_app_data: Option<OsString>, user_profile: Option<OsString>) -> Self {
+        let base = local_app_data
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| {
+                PathBuf::from(user_profile.unwrap_or_else(|| ".".into()))
+                    .join("AppData")
+                    .join("Local")
+            });
+        Self {
+            root: base.join("OpenKax"),
+        }
+    }
+}
+
+impl Platform for WindowsPlatform {
+    fn data_dir(&self) -> PathBuf {
+        self.root.clone()
+    }
+
+    fn config_dir(&self) -> PathBuf {
+        self.root.clone()
+    }
+}
+
 /// Plataforma do processo atual.
 #[cfg(unix)]
 pub fn current() -> impl Platform {
     UnixPlatform::from_env()
 }
 
+/// Plataforma do processo atual.
 #[cfg(windows)]
-compile_error!(
-    "WindowsPlatform ainda não existe: entra com o workflow de CI no fechamento da Fase 0"
-);
+pub fn current() -> impl Platform {
+    WindowsPlatform::from_env()
+}
 
 #[cfg(test)]
 mod tests {
@@ -90,22 +137,69 @@ mod tests {
         Some(s.into())
     }
 
+    /// Caminho absoluto em qualquer SO (`/x` não é absoluto no Windows).
+    fn abs(rel: &str) -> PathBuf {
+        std::env::current_dir().unwrap().join(rel)
+    }
+
+    fn some(p: &std::path::Path) -> Option<OsString> {
+        Some(p.as_os_str().to_owned())
+    }
+
+    /// Mesma interface nos dois SOs: ledger/estado/logs debaixo de `data_dir`.
+    fn assert_layout(p: &impl Platform, data: PathBuf, config: PathBuf) {
+        assert_eq!(p.data_dir(), data);
+        assert_eq!(p.config_dir(), config);
+        assert_eq!(p.ledger_dir(), data.join("ledger"));
+        assert_eq!(p.state_dir(), data.join("state"));
+        assert_eq!(p.logs_dir(), data.join("logs"));
+    }
+
     #[test]
     fn xdg_wins_when_absolute() {
-        let p = UnixPlatform::from_vars(os("/x/data"), os("/x/cfg"), os("/home/u"));
-        assert_eq!(p.data_dir(), PathBuf::from("/x/data/openkax"));
-        assert_eq!(p.config_dir(), PathBuf::from("/x/cfg/openkax"));
-        assert_eq!(p.ledger_dir(), PathBuf::from("/x/data/openkax/ledger"));
+        let (data, cfg) = (abs("x-data"), abs("x-cfg"));
+        let p = UnixPlatform::from_vars(some(&data), some(&cfg), os("home-u"));
+        assert_layout(&p, data.join("openkax"), cfg.join("openkax"));
     }
 
     #[test]
     fn falls_back_to_home_when_xdg_missing_or_relative() {
-        let p = UnixPlatform::from_vars(None, os("rel/cfg"), os("/home/u"));
-        assert_eq!(p.data_dir(), PathBuf::from("/home/u/.local/share/openkax"));
-        assert_eq!(p.config_dir(), PathBuf::from("/home/u/.config/openkax"));
-        assert_eq!(
-            p.state_dir(),
-            PathBuf::from("/home/u/.local/share/openkax/state")
+        let home = abs("home-u");
+        let p = UnixPlatform::from_vars(None, os("rel/cfg"), some(&home));
+        assert_layout(
+            &p,
+            home.join(".local").join("share").join("openkax"),
+            home.join(".config").join("openkax"),
         );
+    }
+
+    #[test]
+    fn windows_uses_localappdata_for_everything() {
+        let base = abs("lad");
+        let p = WindowsPlatform::from_vars(some(&base), os("ignored"));
+        let root = base.join("OpenKax");
+        assert_layout(&p, root.clone(), root);
+    }
+
+    #[test]
+    fn windows_falls_back_to_userprofile_when_localappdata_missing_or_relative() {
+        let profile = abs("profile-u");
+        let root = profile.join("AppData").join("Local").join("OpenKax");
+        for lad in [None, os("rel")] {
+            let p = WindowsPlatform::from_vars(lad, some(&profile));
+            assert_layout(&p, root.clone(), root.clone());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn current_is_windows_platform() {
+        assert_eq!(current().data_dir(), WindowsPlatform::from_env().data_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn current_is_unix_platform() {
+        assert_eq!(current().data_dir(), UnixPlatform::from_env().data_dir());
     }
 }

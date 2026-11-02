@@ -17,9 +17,10 @@ Não iniciar Fase 1 antes disso. Atualize esta seção ao mudar de fase.
 Progresso (2026-11-02): scheduler/dispatcher/ledger + providers de cauda (ADR 0003/0004); 13 testes de integração wiremock passando; smoke real pelo gateway feito (docs/smoke/2026-11-02-f0-14.md); release Linux 3,47 MB. Falta: hot-reload + snapshot dos buckets, IDs Groq/GitHub/Cloudflare, chave Vercel, WindowsPlatform + CI `.exe`, aceite com Continue/Cline. Ver `tasks.json`.
 
 ## Ambientes (ver ADR 0001)
-- **Dev e testes rodam em Linux** (WSL2 Ubuntu no notebook; o repo fica em `~/openkax`, ext4). Todos os comandos que você propuser são **bash em Linux**, nunca PowerShell.
-- O notebook tem WDAC em modo enforce: **nenhum `.exe` não assinado roda no host**. Não tente executar o binário Windows lá; rode o binário Linux dentro do WSL (`127.0.0.1:8000`) — clientes no Windows alcançam via `localhost:8000`.
-- O `.exe` de release é construído pelo GitHub Actions (`windows-latest`) e no PC de casa. Código é cross-platform; integração com SO (tray, autostart, paths) isolada atrás de um trait `Platform`.
+Dois ambientes de dev; descubra em qual está (`uname`/plataforma) antes de propor comandos.
+- **Notebook (WSL2 Ubuntu)**: repo em `~/openkax` (ext4). Comandos **bash em Linux**, nunca PowerShell. Tem WDAC em modo enforce: **nenhum `.exe` não assinado roda no host**; rode o binário Linux dentro do WSL (`127.0.0.1:8000`) — clientes no Windows alcançam via `localhost:8000`.
+- **PC de casa (`kaxcavmaster`, Windows nativo)**: sem WDAC, sem VPN, repo em `D:\dev\openkax`. PowerShell e Git Bash permitidos; `cargo test`/`clippy` rodam no Windows e o `.exe` roda localmente (medir tamanho/RSS, smoke). Rede sem proxy: é daqui que se conferem Groq/GitHub.
+- O `.exe` de **release** vem do GitHub Actions (`windows-latest`); o build local é só para medir e testar. Código é cross-platform; integração com SO (tray, autostart, paths) isolada atrás do trait `Platform` (`UnixPlatform` XDG, `WindowsPlatform` `%LOCALAPPDATA%\OpenKax`).
 - Validação de chaves: `./doctor.sh` (Linux) ou `.\doctor.ps1` (Windows sem WDAC).
 
 ## Stack e regras de código
