@@ -6,3 +6,6 @@ Entradas mais recentes no fim. Formato e regras em `RUNBOOK.md`.
 - Conflito do PR #1 resolvido: merge de `main` na `fase-0` (`35e0484`); `providers-setup.md` alinhado ao ADR 0004.
 - Runbook criado. Execuções agendadas de hora em hora até 2026-11-03 08:00.
 - Portão: Fase 1 só começa depois que o Kaxcav fizer o aceite Continue/Cline e o merge do PR #1.
+
+## 2026-11-02 15:23 — F0-24 compat de clientes — EM ANDAMENTO
+- Branch `fase-1` criada a partir de `origin/fase-0` (PR #1 ainda aberto).
