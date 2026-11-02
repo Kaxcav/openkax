@@ -151,14 +151,14 @@
       "id": "F0-24",
       "title": "Compat de clientes: suíte wiremock com os formatos de request do Continue e do Cline (substitui o aceite manual como critério bloqueante)",
       "owner": "lead",
-      "status": "ci_pending",
-      "note": "tests/client_compat.rs: 12 testes; total 99 unitários + 31 de integração, verdes no Linux. Falta o CI do commit do turno (Linux e Windows): a próxima execução confere e marca done. Revelou 4 defeitos, corrigidos: usage em chunk não final (continuedev/continue#13417), content:null sumindo, chamadas paralelas fundidas com index repetido/ausente, erro depois do finish_reason. Parte dos formatos veio de memória: ver cabeçalho do teste."
+      "status": "done",
+      "note": "tests/client_compat.rs: 12 testes; total 99 unitários + 31 de integração, verdes no Linux. CI run 41504593873 verde (ubuntu-latest e windows-latest). Revelou 4 defeitos, corrigidos: usage em chunk não final (continuedev/continue#13417), content:null sumindo, chamadas paralelas fundidas com index repetido/ausente, erro depois do finish_reason. Parte dos formatos veio de memória: ver cabeçalho do teste."
     },
     {
       "id": "F1-1",
       "title": "CONTRACT: tipos serde do Anthropic Messages, assinaturas translate::anthropic, testes vermelhos, ADR 0006",
       "owner": "lead",
-      "status": "todo",
+      "status": "in_progress",
       "depends": []
     },
     {
