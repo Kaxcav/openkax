@@ -39,6 +39,8 @@ A [doc do Gemini](https://ai.google.dev/gemini-api/docs/generate-content/thought
 - `message_start.model` é o que o cliente pediu (classe ou alias). O modelo real vai no ledger e em `x-openkax-provider`.
 - `message_start.usage.input_tokens` é estimado. Se o upstream informar `usage`, `message_delta.usage` traz também `input_tokens` para corrigir a estimativa. Sem `usage`, `output_tokens` é estimado por `chars_per_token`.
 - `stop→end_turn`, `tool_calls→tool_use`, `length→max_tokens`, `content_filter→refusal`; outro valor ou ausência → `end_turn`. Com tool emitida, tudo que não é `length`/`content_filter` vira `tool_use`: há provider que manda `stop` ou nada, e o cliente precisa saber que deve executar.
+- Chamada que chega ao fim sem `name` some, e não conta para `tool_use`: o cliente não teria o que executar. Pelo mesmo motivo, `finish_reason: "tool_calls"` sem nenhuma tool emitida vira `end_turn`.
+- `usage` zerado vale como não informado: é upstream que não contou, não resposta de custo zero.
 - Morte pós-1º-token, ou `finish_reason: "error"`: evento `error` (`api_error`) e fim. Não há `message_stop` depois dele.
 - A resposta não-stream é a dobra dos mesmos eventos (`collect_response`), então os dois modos não divergem. Argumentos de tool que não são objeto JSON (truncados, `null`, lista) viram `input: {}`, com o `stop_reason` contando o motivo.
 

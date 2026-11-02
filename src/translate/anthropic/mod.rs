@@ -5,19 +5,15 @@
 //! tipos: o serde ignora campo desconhecido, e bloco de tipo desconhecido vira
 //! [`ContentBlock::Unknown`]. O passthrough de `claude-*` não passa por aqui:
 //! ele repassa os bytes do cliente.
-//!
-//! CONTRACT (F1-1): [`OpenAiToAnthropicStream`], [`encode_tool_use_id`] e
-//! [`collect_response`] ainda são stubs (F1-3); os testes de aceite deles estão
-//! com `#[ignore = "F1-3"]`.
 
 use bytes::Bytes;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
-use super::openai::{ChatCompletionChunk, Usage};
-
 mod request;
+mod stream;
 pub use request::to_openai_request;
+pub use stream::{OpenAiToAnthropicStream, StreamMeta, collect_response};
 
 /// Prefixo do texto de um `tool_result` com `is_error: true`: a mensagem `tool`
 /// do OpenAI não tem campo para isso.
@@ -351,9 +347,22 @@ pub fn encode_sse(event: &StreamEvent) -> Bytes {
 // ---------------------------------------------------------------- tradução
 
 /// Junta o `id` do upstream e a assinatura de raciocínio no `tool_use.id` que vai
-/// ao cliente. Sem assinatura, o `id` passa igual. Stub do CONTRACT (F1-3).
-pub fn encode_tool_use_id(id: &str, _signature: Option<&str>) -> String {
-    id.to_owned()
+/// ao cliente, em hexadecimal: cabe no padrão de `tool_use.id` seja qual for o
+/// alfabeto da assinatura. Sem assinatura, o `id` passa igual.
+pub fn encode_tool_use_id(id: &str, signature: Option<&str>) -> String {
+    let Some(signature) = signature.filter(|s| !s.is_empty()) else {
+        return id.to_owned();
+    };
+    let mut out =
+        String::with_capacity(id.len() + TOOL_ID_SIGNATURE_SEP.len() + signature.len() * 2);
+    out.push_str(id);
+    out.push_str(TOOL_ID_SIGNATURE_SEP);
+    for byte in signature.bytes() {
+        for nibble in [byte >> 4, byte & 0xf] {
+            out.extend(char::from_digit(nibble.into(), 16));
+        }
+    }
+    out
 }
 
 /// Inverso de [`encode_tool_use_id`]: `id` original e assinatura, se havia.
@@ -385,62 +394,6 @@ fn decode_hex(hex: &str) -> Option<String> {
         })
         .collect::<Option<Vec<u8>>>()?;
     String::from_utf8(bytes).ok()
-}
-
-/// Identificação da resposta que o tradutor de stream vai montar.
-#[derive(Debug, Clone, PartialEq)]
-pub struct StreamMeta {
-    /// `id` da mensagem (`msg_…`).
-    pub message_id: String,
-    /// Modelo que o cliente pediu (classe ou alias), não o do upstream.
-    pub model: String,
-    /// `usage.input_tokens` de `message_start`.
-    pub est_input_tokens: u32,
-    /// Estima `output_tokens` se o upstream não informar `usage`.
-    pub chars_per_token: f64,
-}
-
-/// Chunks OpenAI → eventos Anthropic, sem I/O.
-///
-/// Espera chunks já normalizados pelo despacho: raciocínio removido e índices de
-/// `tool_calls` estáveis. Os blocos saem em sequência, um aberto por vez: o que
-/// chega intercalado fica retido até o bloco aberto fechar (ADR 0006).
-///
-/// Stub do CONTRACT (F1-3).
-#[derive(Debug)]
-pub struct OpenAiToAnthropicStream {
-    _meta: StreamMeta,
-}
-
-impl OpenAiToAnthropicStream {
-    pub fn new(meta: StreamMeta) -> Self {
-        Self { _meta: meta }
-    }
-
-    /// Um chunk do upstream. O 1º chamado emite `message_start`.
-    pub fn push(&mut self, _chunk: &ChatCompletionChunk) -> Vec<StreamEvent> {
-        Vec::new()
-    }
-
-    /// Fim normal do upstream: fecha os blocos, `message_delta`, `message_stop`.
-    /// `usage` é o último informado pelo upstream, se houve.
-    pub fn finish(&mut self, _usage: Option<Usage>) -> Vec<StreamEvent> {
-        Vec::new()
-    }
-
-    /// Upstream morreu depois do 1º token: evento `error` e nada mais depois dele.
-    pub fn fail(&mut self, _kind: &str, _message: &str) -> Vec<StreamEvent> {
-        Vec::new()
-    }
-}
-
-/// Dobra os eventos de uma resposta completa na mensagem não-stream. Evento
-/// `error` vira `Err`. Stub do CONTRACT (F1-3).
-pub fn collect_response(_events: &[StreamEvent]) -> Result<MessagesResponse, ApiError> {
-    Err(ApiError {
-        kind: "api_error".into(),
-        message: "tradução ainda não implementada (F1-3)".into(),
-    })
 }
 
 #[cfg(test)]

@@ -11,7 +11,9 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::scheduler::estimate_tokens;
-use crate::translate::openai::{ChatCompletionRequest, ChunkChoice, Delta};
+use crate::translate::openai::{
+    ChatCompletionChunk, ChatCompletionRequest, ChunkChoice, Delta, Usage,
+};
 
 const CLAUDE_CODE: &str =
     include_str!("../../../tests/fixtures/anthropic/claude_code_request.json");
@@ -921,7 +923,6 @@ const USAGE: Usage = Usage {
 };
 
 #[test]
-#[ignore = "F1-3"]
 fn text_only_stream_byte_by_byte() {
     let events = run(
         &[
@@ -961,7 +962,6 @@ fn text_only_stream_byte_by_byte() {
 
 /// Cada `push` devolve o que já pode sair: o stream não espera o fim.
 #[test]
-#[ignore = "F1-3"]
 fn each_push_emits_what_is_ready() {
     let mut t = OpenAiToAnthropicStream::new(meta());
     assert_eq!(
@@ -1003,7 +1003,6 @@ fn each_push_emits_what_is_ready() {
 /// O bloco aberto segue ao vivo; o resto fica retido até ele fechar, na ordem em
 /// que apareceu: quem lê espera um bloco aberto por vez.
 #[test]
-#[ignore = "F1-3"]
 fn text_and_two_interleaved_tools_byte_by_byte() {
     let events = run(
         &[
@@ -1067,7 +1066,6 @@ fn text_and_two_interleaved_tools_byte_by_byte() {
 }
 
 #[test]
-#[ignore = "F1-3"]
 fn text_arriving_while_a_tool_is_open_waits_for_it() {
     let events = run(
         &[
@@ -1097,7 +1095,6 @@ fn text_arriving_while_a_tool_is_open_waits_for_it() {
 }
 
 #[test]
-#[ignore = "F1-3"]
 fn stop_reason_table() {
     let tool = tool_chunk(
         json!([{ "index": 0, "id": "c1", "function": { "name": "Ls", "arguments": "{}" } }]),
@@ -1133,7 +1130,6 @@ fn stop_reason_table() {
 
 /// Há upstream que sinaliza falha com `finish_reason: "error"`: não é sucesso.
 #[test]
-#[ignore = "F1-3"]
 fn finish_reason_error_becomes_error_event() {
     let e = run(&[text_chunk("a"), finish_chunk("error")], None);
     assert_eq!(
@@ -1148,7 +1144,6 @@ fn finish_reason_error_becomes_error_event() {
 }
 
 #[test]
-#[ignore = "F1-3"]
 fn empty_text_other_choices_and_reasoning_open_no_block() {
     let mut reasoning = text_chunk("");
     reasoning.choices[0].delta.content = None;
@@ -1189,7 +1184,6 @@ fn empty_text_other_choices_and_reasoning_open_no_block() {
 }
 
 #[test]
-#[ignore = "F1-3"]
 fn tool_without_args_has_no_delta_and_name_may_arrive_late() {
     let e = run(
         &[
@@ -1225,7 +1219,6 @@ fn tool_without_args_has_no_delta_and_name_may_arrive_late() {
 /// O bloco só abre com `id` e `name`; os argumentos esperam. Sem `id` nenhum até
 /// o fim, o gateway gera um, diferente por chamada.
 #[test]
-#[ignore = "F1-3"]
 fn tool_id_may_arrive_late_or_never() {
     let e = run(
         &[
@@ -1267,7 +1260,6 @@ fn tool_id_may_arrive_late_or_never() {
 /// Gemini 3+ devolve 400 sem a assinatura na rodada seguinte; o `tool_use.id` a
 /// leva, em hexadecimal, até o cliente e de volta (ADR 0006).
 #[test]
-#[ignore = "F1-3"]
 fn thought_signature_travels_in_the_tool_use_id() {
     let e = run(
         &[
@@ -1305,7 +1297,6 @@ fn thought_signature_travels_in_the_tool_use_id() {
 /// Sem `usage` do upstream: saída estimada por `chars_per_token`; a entrada
 /// estimada fica a de `message_start` (o delta não a repete).
 #[test]
-#[ignore = "F1-3"]
 fn missing_usage_estimates_output_tokens() {
     let e = run(
         &[
@@ -1332,7 +1323,6 @@ fn missing_usage_estimates_output_tokens() {
 }
 
 #[test]
-#[ignore = "F1-3"]
 fn mid_stream_failure_ends_with_error_and_nothing_after() {
     let mut t = OpenAiToAnthropicStream::new(meta());
     let mut e = t.push(&text_chunk("oi"));
@@ -1362,7 +1352,6 @@ fn mid_stream_failure_ends_with_error_and_nothing_after() {
 }
 
 #[test]
-#[ignore = "F1-3"]
 fn finish_is_idempotent_and_empty_upstream_still_closes_the_message() {
     let mut t = OpenAiToAnthropicStream::new(meta());
     let e = t.finish(None);
@@ -1374,7 +1363,6 @@ fn finish_is_idempotent_and_empty_upstream_still_closes_the_message() {
 }
 
 #[test]
-#[ignore = "F1-3"]
 fn collect_builds_the_full_response() {
     let events = run(
         &[
@@ -1413,7 +1401,6 @@ fn collect_builds_the_full_response() {
 /// Argumentos truncados por `max_tokens` não são JSON: `input` fica `{}` e o
 /// `stop_reason` conta o que houve.
 #[test]
-#[ignore = "F1-3"]
 fn collect_with_truncated_args_keeps_empty_input() {
     let events = run(
         &[
@@ -1442,7 +1429,6 @@ fn collect_with_truncated_args_keeps_empty_input() {
 
 /// `input` é sempre objeto: JSON válido de outro tipo também vira `{}`.
 #[test]
-#[ignore = "F1-3"]
 fn collect_with_non_object_args_keeps_empty_input() {
     for args in ["null", "[1]", "3"] {
         let events = run(
@@ -1464,4 +1450,263 @@ fn collect_with_non_object_args_keeps_empty_input() {
             "{args}"
         );
     }
+}
+
+/// Tudo que sai tem de ser um stream que o cliente aceita: um `message_start`,
+/// blocos em sequência e um aberto por vez, delta só no bloco aberto, e o fim
+/// (`message_delta` + `message_stop`, ou `error`) só depois dos blocos fechados.
+fn assert_well_formed(events: &[StreamEvent]) {
+    let mut open = None;
+    let mut next = 0;
+    let mut stopped = false;
+    assert!(matches!(
+        events.first(),
+        Some(StreamEvent::MessageStart { .. })
+    ));
+    for e in &events[1..] {
+        assert!(!stopped, "evento depois do message_stop: {e:?}");
+        match e {
+            StreamEvent::MessageStart { .. } => panic!("2º message_start"),
+            StreamEvent::ContentBlockStart { index, .. } => {
+                assert_eq!(open, None, "{e:?}");
+                assert_eq!(*index, next, "{e:?}");
+                open = Some(*index);
+                next += 1;
+            }
+            StreamEvent::ContentBlockDelta { index, .. } => {
+                assert_eq!(open, Some(*index), "{e:?}");
+            }
+            StreamEvent::ContentBlockStop { index } => {
+                assert_eq!(open, Some(*index), "{e:?}");
+                open = None;
+            }
+            StreamEvent::MessageDelta { .. } => assert_eq!(open, None, "{e:?}"),
+            StreamEvent::MessageStop => stopped = true,
+            StreamEvent::Ping | StreamEvent::Error { .. } => {}
+        }
+    }
+    assert!(stopped, "sem message_stop: {events:?}");
+}
+
+/// O id, o nome e os argumentos chegam em qualquer ordem, intercalados com texto:
+/// o stream continua bem formado e nada se perde nem troca de lugar.
+#[test]
+fn any_interleaving_stays_well_formed_and_in_order() {
+    let chunks = [
+        text_chunk("a"),
+        tool_chunk(json!([{ "index": 0, "function": { "arguments": "{\"x\":" } }])),
+        text_chunk("b"),
+        tool_chunk(
+            json!([{ "index": 1, "id": "c2", "function": { "name": "Ls", "arguments": "{" } }]),
+        ),
+        text_chunk("c"),
+        tool_chunk(
+            json!([{ "index": 0, "id": "c1", "function": { "name": "Read", "arguments": "1}" } }]),
+        ),
+        tool_chunk(json!([{ "index": 1, "function": { "arguments": "}" } }])),
+        text_chunk("d"),
+        finish_chunk("tool_calls"),
+    ];
+    let events = run(&chunks, Some(USAGE));
+    assert_well_formed(&events);
+    assert_eq!(
+        collect_response(&events).unwrap().content,
+        vec![
+            ContentBlock::Text { text: "a".into() },
+            ContentBlock::ToolUse {
+                id: "c1".into(),
+                name: "Read".into(),
+                input: json!({ "x": 1 })
+            },
+            ContentBlock::Text { text: "b".into() },
+            ContentBlock::ToolUse {
+                id: "c2".into(),
+                name: "Ls".into(),
+                input: json!({})
+            },
+            ContentBlock::Text { text: "cd".into() },
+        ]
+    );
+}
+
+/// A 1ª tool fecha o texto mesmo antes de poder abrir: o texto seguinte é outro
+/// bloco, depois dela. Enquanto ela espera o `id`, o aberto já fechou.
+#[test]
+fn tool_waiting_for_its_id_closes_the_text_and_holds_what_follows() {
+    let mut t = OpenAiToAnthropicStream::new(meta());
+    t.push(&text_chunk("a"));
+    assert_eq!(
+        names(&t.push(&tool_chunk(
+            json!([{ "index": 0, "function": { "name": "Read", "arguments": "{" } }])
+        ))),
+        ["content_block_stop"]
+    );
+    assert!(t.push(&text_chunk("b")).is_empty());
+    assert_eq!(
+        names(&t.push(&tool_chunk(json!([{ "index": 0, "id": "c1" }])))),
+        ["content_block_start", "content_block_delta"]
+    );
+}
+
+#[test]
+fn text_and_tool_calls_in_the_same_chunk_keep_text_first() {
+    let chunk = delta_chunk(
+        0,
+        Delta {
+            content: Some("oi".into()),
+            tool_calls: serde_json::from_value(json!([
+                { "index": 0, "id": "c1", "function": { "name": "Read", "arguments": "{}" } },
+                { "index": 1, "id": "c2", "function": { "name": "Ls", "arguments": "{}" } },
+            ]))
+            .unwrap(),
+            ..Delta::default()
+        },
+        Some("tool_calls"),
+    );
+    let events = run(&[chunk], None);
+    assert_well_formed(&events);
+    let content = collect_response(&events).unwrap().content;
+    assert_eq!(content.len(), 3);
+    assert_eq!(content[0], ContentBlock::Text { text: "oi".into() });
+    assert!(matches!(&content[2], ContentBlock::ToolUse { id, .. } if id == "c2"));
+}
+
+/// Cliente executa tool de nome conhecido: chamada que nunca recebeu nome some, e
+/// não conta para `tool_use`. A ordem do resto fica, e o `n` do `id` gerado é o da
+/// ordem de aparição.
+#[test]
+fn tool_that_never_gets_a_name_is_dropped() {
+    let events = run(
+        &[
+            tool_chunk(json!([{ "index": 0, "id": "c1", "function": { "arguments": "{}" } }])),
+            text_chunk("fim"),
+            finish_chunk("tool_calls"),
+        ],
+        None,
+    );
+    assert_well_formed(&events);
+    assert_eq!(stop_reason(&events), Some(StopReason::EndTurn));
+    assert_eq!(
+        collect_response(&events).unwrap().content,
+        vec![ContentBlock::Text { text: "fim".into() }]
+    );
+
+    let events = run(
+        &[
+            tool_chunk(json!([{ "index": 0, "function": { "arguments": "{}" } }])),
+            tool_chunk(json!([{ "index": 1, "function": { "name": "Ls", "arguments": "{}" } }])),
+        ],
+        None,
+    );
+    assert_well_formed(&events);
+    assert_eq!(stop_reason(&events), Some(StopReason::ToolUse));
+    assert!(matches!(
+        &collect_response(&events).unwrap().content[..],
+        [ContentBlock::ToolUse { id, .. }] if id == "toolu_msg_1_1"
+    ));
+}
+
+/// `tool_use` sem nenhum bloco deixaria o cliente esperando tool que não existe.
+#[test]
+fn tool_calls_finish_without_any_tool_is_end_turn() {
+    let events = run(&[text_chunk("a"), finish_chunk("tool_calls")], None);
+    assert_eq!(stop_reason(&events), Some(StopReason::EndTurn));
+}
+
+/// `finish_reason: ""` é o `null` de alguns upstreams: não apaga o que já veio.
+#[test]
+fn empty_finish_reason_does_not_overwrite() {
+    let events = run(
+        &[text_chunk("a"), finish_chunk("length"), finish_chunk("")],
+        None,
+    );
+    assert_eq!(stop_reason(&events), Some(StopReason::MaxTokens));
+}
+
+/// `usage` zerado é upstream que não contou, não resposta de custo zero.
+#[test]
+fn zeroed_usage_falls_back_to_the_estimates() {
+    let delta_usage = |usage: Usage| {
+        run(&[text_chunk("abcdefgh")], Some(usage))
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::MessageDelta { usage, .. } => Some(*usage),
+                _ => None,
+            })
+    };
+    assert_eq!(
+        delta_usage(Usage::default()),
+        Some(DeltaUsage {
+            input_tokens: None,
+            output_tokens: 2
+        })
+    );
+    assert_eq!(
+        delta_usage(Usage {
+            prompt_tokens: 20,
+            ..Usage::default()
+        }),
+        Some(DeltaUsage {
+            input_tokens: Some(20),
+            output_tokens: 2
+        })
+    );
+}
+
+/// Pedaço depois do fim não gera nada, nem depois de `finish`.
+#[test]
+fn nothing_comes_out_after_finish() {
+    let mut t = OpenAiToAnthropicStream::new(meta());
+    t.push(&text_chunk("a"));
+    t.finish(None);
+    assert!(t.push(&text_chunk("b")).is_empty());
+    assert!(t.fail("api_error", "tarde").is_empty());
+}
+
+/// Falha antes de qualquer chunk: o evento `error` basta, sem `message_start`.
+#[test]
+fn fail_before_any_chunk_is_only_the_error() {
+    let mut t = OpenAiToAnthropicStream::new(meta());
+    assert_eq!(names(&t.fail("api_error", "caiu")), ["error"]);
+}
+
+#[test]
+fn encode_tool_use_id_roundtrips_and_skips_empty_signature() {
+    let id = encode_tool_use_id("c1", Some("assinatura ç"));
+    assert_eq!(
+        decode_tool_use_id(&id),
+        ("c1".to_owned(), Some("assinatura ç".to_owned()))
+    );
+    assert_eq!(encode_tool_use_id("c1", None), "c1");
+    assert_eq!(encode_tool_use_id("c1", Some("")), "c1");
+}
+
+/// Assinatura que chega depois do `id` mas antes do nome ainda vale; o bloco só
+/// abre com os dois.
+#[test]
+fn signature_before_the_block_opens_is_kept() {
+    let events = run(
+        &[
+            tool_chunk(json!([{ "index": 0, "id": "c1" }])),
+            tool_chunk(json!([{
+                "index": 0,
+                "extra_content": { "google": { "thought_signature": "S" } },
+            }])),
+            tool_chunk(json!([{ "index": 0, "function": { "name": "Ls", "arguments": "{}" } }])),
+            finish_chunk("tool_calls"),
+        ],
+        None,
+    );
+    assert!(matches!(
+        &collect_response(&events).unwrap().content[..],
+        [ContentBlock::ToolUse { id, .. }] if id == &encode_tool_use_id("c1", Some("S"))
+    ));
+}
+
+#[test]
+fn collect_rejects_an_incomplete_stream() {
+    assert!(collect_response(&[]).is_err());
+    let mut t = OpenAiToAnthropicStream::new(meta());
+    let partial = t.push(&text_chunk("a"));
+    assert!(collect_response(&partial).is_err());
 }
