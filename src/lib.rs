@@ -8,10 +8,12 @@
 //! - [`server`]: rotas HTTP (`axum`) e despacho com fallback pré-1º-token.
 //! - [`ledger`]: JSONL de metadados por request (nunca corpo, nunca credencial).
 //! - [`mcp`]: servidor MCP `kax-workers` (Fase 2).
+//! - [`doctor`]: `openkax doctor`, validação de providers (F5-1).
 //! - [`verify`]: runners de verificação em worktree (Fase 2).
 //! - [`platform`]: integração com o SO atrás do trait `Platform` (ADR 0001).
 
 pub mod config;
+pub mod doctor;
 pub mod ledger;
 pub mod mcp;
 pub mod platform;
