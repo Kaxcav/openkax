@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use openkax::context::index::store_dir;
 use openkax::context::lang::RustAdapter;
@@ -1090,4 +1091,57 @@ fn crlf_is_normalized_and_limits_skip_files() {
             "{f}"
         );
     }
+}
+
+// ---------------------------------------------------------- repo openkax --
+
+/// Indexa o próprio repo openkax: tempo do 1º `refresh` (frio, tudo parseado)
+/// e do 2º (quente, de outro `open` sobre o `index.json` salvo) e tamanho do
+/// índice. Os números saem com `cargo test -- --nocapture`; o teto é só
+/// informativo (no debug do CI, perto de 5 s viraria `#[ignore]`).
+#[test]
+fn index_the_openkax_repo() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let store = tempfile::tempdir().unwrap();
+
+    let t = Instant::now();
+    let mut idx = Index::open(root, store.path()).unwrap();
+    let cold = idx.refresh().unwrap();
+    let cold_time = t.elapsed();
+    idx.save().unwrap();
+    let index_bytes = fs::metadata(store.path().join("index.json")).unwrap().len();
+
+    let t = Instant::now();
+    let mut warm_idx = Index::open(root, store.path()).unwrap();
+    let warm = warm_idx.refresh().unwrap();
+    let warm_time = t.elapsed();
+
+    let file = fs::read_to_string(root.join("src/context/index.rs")).unwrap();
+    let p = idx.pack(&["Index::refresh"], 6000, CPT).unwrap();
+    eprintln!(
+        "openkax: {} arquivos, {} símbolos; frio {cold_time:?} ({cold:?}); \
+         quente {warm_time:?} ({warm:?}); index.json {index_bytes} B; \
+         pack de Index::refresh {} tokens contra {} do arquivo inteiro",
+        idx.stats().files,
+        idx.stats().symbols,
+        p.tokens_estimated,
+        tokens(&file),
+    );
+
+    assert!(cold.parsed > 50, "{cold:?}");
+    assert_eq!(warm.parsed, 0, "{warm:?}");
+    assert_eq!(warm.reused, cold.parsed + cold.reused);
+    assert_eq!(warm_idx.stats().parses_total, 0);
+
+    let def = &idx.symbol("Index::refresh").unwrap()[0];
+    assert_eq!(def.symbol.file, "src/context/index.rs");
+    assert_eq!(def.symbol.kind, SymbolKind::Method);
+    assert!(idx.callers("content_hash").unwrap().iter().any(|s| {
+        s.file == "src/context/index.rs"
+            && s.enclosing
+                .as_ref()
+                .is_some_and(|e| e.qual_name == "Index::refresh")
+    }));
+    assert_eq!(p.excerpts[0].role, PackRole::Target);
+    assert!(p.tokens_estimated < tokens(&file));
 }
