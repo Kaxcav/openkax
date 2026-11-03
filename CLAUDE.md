@@ -41,7 +41,7 @@ ou via `[aliases]` no `providers.toml`:
 - Registrar: `claude mcp add kax-workers -- <caminho>\openkax.exe mcp` (stdio; `OPENKAX_CONFIG` aponta o `providers.toml`).
 - Tools: `delegate`, `delegate_batch` (background, `parallelism` 4, máx. 16), `status(batch_id)`, `quota`, `report(day|week|month)`.
 - Cada tarefa roda num worktree `.kax/wt/<id>`; aceita → branch `kax/<id>` para integrar. Recusa/esgotou → `needs_lead` (você faz).
-- Verify: comandos de `accept.verify`; `.kax/verify.toml` ajusta só `timeout_s`/`max_log_bytes` (ver `.kax/verify.toml.example`).
+- Verify: comandos de `accept.verify`; `.kax/verify.toml` ajusta `timeout_s`, `max_log_bytes` e `env_passthrough` (nunca segredo; ver ADR 0007).
 - Ledger `kind:"task"` em `%LOCALAPPDATA%\OpenKax\ledger`; limpeza: `openkax clean [--repo <path>] [--all]`.
 - Aceite manual: `docs/smoke/fase-2-aceite.md`; decisão: ADR 0007.
 
