@@ -155,7 +155,6 @@ fn ts_js_py_fixtures_parse_cleanly() {
 // ------------------------------------------------------------ TypeScript --
 
 #[test]
-#[ignore = "P6b"]
 fn ts_outline_of_shapes() {
     let (src, facts) = extract(&TypeScriptAdapter, "ts", "src/shapes.ts");
     assert_eq!(facts.module, ["src", "shapes"]);
@@ -226,7 +225,6 @@ fn ts_outline_of_shapes() {
 }
 
 #[test]
-#[ignore = "P6b"]
 fn ts_imports_and_refs() {
     let (_, main) = extract(&TypeScriptAdapter, "ts", "src/main.ts");
     assert_eq!(main.module, ["src", "main"]);
@@ -269,7 +267,6 @@ fn ts_imports_and_refs() {
 }
 
 #[test]
-#[ignore = "P6b"]
 fn tsx_and_type_assertions_use_the_right_grammar() {
     let tsx = TypeScriptAdapter.extract(
         Path::new("src/App.tsx"),
@@ -287,7 +284,6 @@ fn tsx_and_type_assertions_use_the_right_grammar() {
 }
 
 #[test]
-#[ignore = "P6b"]
 fn js_outline_of_legacy() {
     let (src, facts) = extract(&JavaScriptAdapter, "ts", "src/legacy.js");
     assert_eq!(facts.module, ["src", "legacy"]);
@@ -487,4 +483,125 @@ fn py_index_symbol_and_callers() {
     let area = idx.callers("Rect.area").unwrap();
     assert_eq!(sites(&area), [owned("pkg/shapes.py", 22, "total_area")]);
     assert!(matches!(area[0].resolution, Resolution::Resolved { .. }));
+}
+
+#[test]
+fn ts_added_language_cases() {
+    let src = r#"import { original as renamed } from "./relative";
+
+export default function defaultFn(): number {
+  return 1;
+}
+
+export const arrowFn = (x: number): number => x * 2;
+
+export class Service {
+  static create(): Service {
+    return new Service();
+  }
+}
+
+export function outer(): number {
+  function inner(): number {
+    return renamed(arrowFn(2));
+  }
+  return inner();
+}
+"#;
+
+    let facts = TypeScriptAdapter.extract(Path::new("src/features.ts"), src);
+    assert_eq!(facts.parse_errors, 0);
+    assert_eq!(facts.module, ["src", "features"]);
+
+    // Imports
+    assert_eq!(facts.imports.len(), 1);
+    assert_eq!(facts.imports[0].source, "./relative");
+    assert_eq!(facts.imports[0].name.as_deref(), Some("original"));
+    assert_eq!(facts.imports[0].alias.as_deref(), Some("renamed"));
+    assert!(!facts.imports[0].glob);
+
+    // Symbols
+    let sym_names: Vec<(&str, SymbolKind, Option<&str>)> = facts
+        .symbols
+        .iter()
+        .map(|s| {
+            (
+                s.qual_name.as_str(),
+                s.kind,
+                s.parent.as_ref().map(|p| p.as_str()),
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        sym_names,
+        [
+            ("defaultFn", SymbolKind::Fn, None),
+            ("arrowFn", SymbolKind::Fn, None),
+            ("Service", SymbolKind::Class, None),
+            (
+                "Service.create",
+                SymbolKind::Method,
+                Some("src/features.ts::Service")
+            ),
+            ("outer", SymbolKind::Fn, None),
+            (
+                "outer.inner",
+                SymbolKind::Fn,
+                Some("src/features.ts::outer")
+            ),
+        ]
+    );
+
+    // Static method signature
+    let create_sym = facts
+        .symbols
+        .iter()
+        .find(|s| s.qual_name == "Service.create")
+        .unwrap();
+    let create_sig = &src[create_sym.signature_span.start_byte as usize
+        ..create_sym.signature_span.end_byte as usize];
+    assert_eq!(create_sig, "static create(): Service");
+
+    // Default export signature
+    let def_sym = facts
+        .symbols
+        .iter()
+        .find(|s| s.qual_name == "defaultFn")
+        .unwrap();
+    let def_sig =
+        &src[def_sym.signature_span.start_byte as usize..def_sym.signature_span.end_byte as usize];
+    assert_eq!(def_sig, "export default function defaultFn(): number");
+
+    // Nested call ref inside outer.inner
+    let f = "src/features.ts";
+    assert!(has_ref(
+        &facts,
+        f,
+        (
+            "renamed",
+            None,
+            false,
+            17,
+            RefKind::Call,
+            Some("outer.inner")
+        )
+    ));
+    assert!(has_ref(
+        &facts,
+        f,
+        (
+            "arrowFn",
+            None,
+            false,
+            17,
+            RefKind::Call,
+            Some("outer.inner")
+        )
+    ));
+    assert!(has_ref(
+        &facts,
+        f,
+        ("inner", None, false, 19, RefKind::Call, Some("outer"))
+    ));
 }
