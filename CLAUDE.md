@@ -12,7 +12,7 @@ Gateway/proxy local de IA em Rust (binário único Windows, < 8 MB, memória pri
 Modo B (MCP com pacote enxuto) é o principal. Modo A (rewrite de modelo via `ANTHROPIC_DEFAULT_HAIKU_MODEL`) é bônus.
 
 ## Fase atual
-**Fase 1 — Ponte Anthropic** (branch `fase-1`, empilhada na `fase-0`). Critério de saída no `PLANO_MESTRE.md` §4 e tarefas F1-* em `docs/noturno/RUNBOOK.md`.
+**Fase 1 — Ponte Anthropic** (branch `fase-1`; a Fase 0 já está na `main`). Critério de saída no `PLANO_MESTRE.md` §4 e tarefas F1-* em `docs/noturno/RUNBOOK.md`.
 Progresso (2026-11-02): Tarefas F1-1 a F1-7 concluídas; F1-8 (documentação, ADR 0006 aceito e roteiro de aceite manual) em revisão.
 - F1-1..F1-4: Tipos e tradução Anthropic ↔ OpenAI, endpoint `POST /v1/messages` para classes `kax/*` (stream/não-stream), fallback pré-1º-token, assinaturas Gemini (`thought_signatures`) e quirks (`alnum9`).
 - F1-5: `POST /v1/messages/count_tokens` para `kax/*` usando `chars_per_token` do 1º degrau, sem reservar cota nem checar limite de pacote.

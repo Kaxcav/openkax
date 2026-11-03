@@ -14,13 +14,13 @@ cargo build --release
 
 2. Suba o gateway utilizando o `.env` local existente (as chaves reais são carregadas em memória pelo processo e **nunca** devem ser impressas no console ou commitadas):
 ```powershell
-.	argetelease\openkax.exe
+.\target\release\openkax.exe
 ```
 
 3. Em outro terminal, confirme a disponibilidade dos endpoints de status:
 ```powershell
-curl -s http://localhost:8000/v1/models
-curl -s http://localhost:8000/quota
+curl.exe -s http://localhost:8000/v1/models
+curl.exe -s http://localhost:8000/quota
 ```
 
 ---
@@ -33,9 +33,9 @@ $env:ANTHROPIC_BASE_URL = "http://localhost:8000"
 ```
 
 ### Teste de Sessão Longa
-1. **Sessão em Sonnet (`claude-3-5-sonnet`)**:
+1. **Sessão em Sonnet (`/model sonnet`)**:
    Inicie o Claude Code (`claude`) e faça uma requisição regular de código.
-2. **Sessão em Opus (`claude-3-opus`) com resposta longa (> 60 s)**:
+2. **Sessão em Opus (`/model opus`) com resposta longa (> 60 s)**:
    Inicie uma tarefa complexa de raciocínio profundo que gere saída contínua por mais de 60 segundos.
    - **Critério**: O stream deve fluir sem interrupção e sem corte de timeout (validando o client dedicado de passthrough com `read_timeout = 300s` e ausência de timeout total de 60 s).
 
