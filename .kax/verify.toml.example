@@ -1,0 +1,22 @@
+# Copie para <repo>/.kax/verify.toml. Os comandos rodam SEMPRE dentro do
+# worktree da tarefa (nunca no repo do lead) e o primeiro que falhar encerra.
+#
+# Hoje (Fase 2) só `timeout_s` e `max_log_bytes` são usados pelo runner: os
+# comandos executados vêm de `accept.verify` no pacote da tarefa. Os blocos
+# [[language]] são validados no parse, mas a seleção por glob ainda não está
+# ligada ao runner — servem de referência para o lead montar `accept.verify`.
+
+timeout_s = 300        # por comando
+max_log_bytes = 4096   # teto do verify_log devolvido (o fim do log é preservado)
+# env_passthrough = []  # variáveis extras herdadas pelo verify (nunca segredo; ver ADR 0007)
+
+[[language]]
+name = "rust"
+globs = ["**/*.rs", "Cargo.toml"]
+commands = ["cargo check --all-targets", "cargo clippy --all-targets -- -D warnings", "cargo test"]
+timeout_s = 900
+
+[[language]]
+name = "node"
+globs = ["**/*.ts", "**/*.js", "package.json"]
+commands = ["npm run lint", "npm test"]

@@ -276,6 +276,7 @@ pub(super) async fn messages(
             fallbacks: 0,
             pinned: false,
             reasoning: false,
+            skip_providers: Vec::new(),
         };
         let translated = to_openai_request(&req);
         if let Some(problem) = invalid(&req, &translated) {
@@ -293,6 +294,7 @@ pub(super) async fn messages(
             fallbacks: 0,
             pinned: false,
             reasoning: false,
+            skip_providers: Vec::new(),
         };
         meta.record(&st, None, None, None, Outcome::Rejected);
         error_response(

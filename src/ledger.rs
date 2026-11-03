@@ -19,15 +19,31 @@ use tokio::sync::mpsc;
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LedgerEntry {
     Request(RequestRecord),
-    // `Task` (delegate_batch) entra na Fase 2.
+    /// Uma tarefa delegada (`delegate`), PLANO §3.7.
+    Task(TaskRecord),
 }
 
 impl LedgerEntry {
     fn ts(&self) -> &str {
         match self {
             Self::Request(r) => &r.ts,
+            Self::Task(t) => &t.ts,
         }
     }
+}
+
+/// Linha `kind:"task"`: metadados do veredito de uma tarefa (nunca o diff).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TaskRecord {
+    /// RFC 3339 UTC.
+    pub ts: String,
+    pub id: String,
+    pub class: String,
+    /// Provider da última tentativa (`None` se nenhum respondeu).
+    pub provider: Option<String>,
+    pub attempts: u32,
+    pub status: crate::mcp::TaskStatus,
+    pub verify_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

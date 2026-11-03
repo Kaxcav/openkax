@@ -64,5 +64,6 @@ No reqwest 0.13 a feature `rustls` puxa `aws-lc-rs`, que no MSVC exige CMake/NAS
   - Memória privada ociosa após uso = **3,8 MiB**: passa no critério com folga.
   - A diferença entre antes e depois fica no ruído (≤ 0,08 MiB). Com requests em sequência há 1 conexão por host, então o teto de 2 conexões ociosas não atua. As threads de blocking já morriam em 10 s (15 → 10 threads em 60 s nos dois binários). Os ~2 MiB que sobram acima do start não vêm do pool nem das threads de blocking.
   - O ganho esperado da higiene está nas rajadas paralelas (várias conexões por host e mais threads de DNS), que esta medição não cobriu.
+- Memória numa rajada do MCP (F2-6, PC de casa, Windows 11, `openkax mcp` do perfil release, só números, critério inalterado). Lote de 8 tarefas, `parallelism = 4`, operários em `wiremock` (4 aceitas, 4 recusadas pelo verify), pico de 4 simultâneas. Memória privada: **antes 1,67 MiB**, **durante (pico amostrado) 2,30 MiB**, **depois +12 s 2,18 MiB**. Os `git`/verify rodam em processos filhos e não entram na conta. Medição única, sem repetição.
 - `rmcp` e `notify` já estão no manifesto; o tamanho vai ser remedido quando entrarem em uso (Fase 0 hot-reload, Fase 2 MCP).
 - Trocar de crate TLS ou de runtime exige um ADR novo.
