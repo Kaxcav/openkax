@@ -1,6 +1,6 @@
 {
   "phase": 2,
-  "updated": "2026-11-02",
+  "updated": "2026-11-03",
   "tasks": [
     {
       "id": "F0-01",
@@ -319,6 +319,45 @@
       "owner": "lead",
       "status": "review",
       "note": "ADR 0008. verify.toml: sandbox = \"bwrap\" (padrão) | \"none\"; fail closed (Windows/macOS/Linux sem bwrap → SandboxUnavailable antes de chamar o operário → needs_lead; none só explícito, com AVISO no verify_log). Linux: bwrap --unshare-all --die-with-parent --new-session, /usr e /etc ro, /bin /lib /lib64 symlink ou ro-bind, tmpfs /tmp e $HOME, ro-bind-try RUSTUP_HOME e CARGO_HOME/{bin,registry,git} (nunca CARGO_HOME inteiro), bind só do worktree, CARGO_NET_OFFLINE=true; args em Vec<OsString>. [[language]].prefetch roda com rede, sem caixa, sobre o base_ref e antes do diff (falha → needs_lead). doctor: checagem sandbox (Linux OK/WARN/FAIL via bwrap --unshare-net; Windows WARN). CI ubuntu: apt bubblewrap + sysctl apparmor_restrict_unprivileged_userns=0; com CI=true bwrap ausente falha o teste. Testes Linux: rede (listener 127.0.0.1 fora; controle sem caixa conecta), .env no pai e arquivo no $HOME real ilegíveis e fora do log, escrita (worktree persiste, /tmp some, pai intocado, /usr ro), cargo test offline de crate mínimo, fail closed com PATH sem bwrap; cfg(not(linux)): padrão recusa sem executar, none roda com aviso; prefetch: ordem provada (marcador do prefetch colide com o diff que tenta criá-lo) e falha → needs_lead sem chamar provider. Mutação manual (sem --unshare-all; ro-bind de $HOME ou do pai) derruba os testes. Build do openkax (~200 deps) conferido dentro da caixa após cargo fetch --locked. Testes de fluxo MCP passam a escrever sandbox = \"none\" (usam git grep, que não roda na caixa). Windows: 245 unitários + 105 integração (1 ignored); WSL Ubuntu 24.04 (CI=true): 249 + 104 (1 ignored)"
+    },
+    {
+      "id": "P6a",
+      "title": "CONTRACT do kax-context: src/context/ (tipos, trait LanguageAdapter, Index/resolve/pack com stub NotImplemented), deps tree-sitter, files[].symbols/lines no MCP, ADR 0009",
+      "owner": "lead",
+      "status": "review",
+      "depends": [],
+      "note": "ADR 0009 (proposta): estudo do gortex (commit 9241f04, só ideias, nada portado, sem NOTICE). Deps: tree-sitter 0.27.1 + rust 0.24.2, typescript 0.23.2, javascript 0.25.0, python 0.25.0; ignore 0.4.34; xxhash-rust 0.8.19 (xxh3). Índice persistido em JSON (<repo>/.kax/context/index.json), invalidado por xxh3-128. files[].symbols/lines só com mode=read, juntos recusados; até a P6d a validação recusa (invalid_input) em vez de mandar o arquivo inteiro. Sem eles o pacote é byte a byte o de antes (golden em tests/fixtures/mcp/). Aceite: 22 testes #[ignore = \"P6c\"] (tests/context_rust.rs) e 9 #[ignore = \"P6b\"] (tests/context_ts_py.rs), os 31 vermelhos com --ignored. Windows: 265 unitários + 110 de integração verdes (32 ignorados), clippy e fmt limpos. Binário release local: 4.180.992 B (main) -> 4.564.480 B, sem gramática dentro; o aumento é a unificação do regex/unicode do tree-sitter (tabelas Unicode do regex-syntax via env-filter)."
+    },
+    {
+      "id": "P6b",
+      "title": "kax-context: adapters TypeScript/JavaScript e Python (src/context/lang/typescript.rs, python.rs)",
+      "owner": "lead",
+      "status": "todo",
+      "depends": [
+        "P6a"
+      ],
+      "note": "Fecha os 9 #[ignore = \"P6b\"] de tests/context_ts_py.rs. Os 3 de índice (*_index_*) também precisam do Index da P6c. Se adaptar query ou heurística do gortex de forma reconhecível: NOTICE na raiz + comentário no arquivo (ADR 0009)."
+    },
+    {
+      "id": "P6c",
+      "title": "kax-context: adapter Rust, Index (percurso, hash, JSON), SymbolTable/resolve e pack",
+      "owner": "lead",
+      "status": "todo",
+      "depends": [
+        "P6a"
+      ],
+      "note": "Fecha os 22 #[ignore = \"P6c\"] de tests/context_rust.rs. Medir o .exe e a memória privada com o índice ligado (informativo desde a decisão de 2026-11-03). Mesma regra de NOTICE da P6b."
+    },
+    {
+      "id": "P6d",
+      "title": "kax-context no pacote: build_request atende files[].symbols/lines com Index::pack; medir pacote >= 3x menor que arquivo inteiro sem queda de aceitação",
+      "owner": "lead",
+      "status": "todo",
+      "depends": [
+        "P6b",
+        "P6c"
+      ],
+      "note": "Tira a recusa 'ainda não são atendidos (P6d)' de TaskPacket::validate. Orçamento do pack a partir de max_packet_tokens e do chars_per_token do 1º degrau. Medição contra a baseline de arquivo inteiro (PLANO §2.3)."
     }
   ]
 }

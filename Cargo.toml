@@ -11,6 +11,8 @@ axum = "0.8.9"
 bytes = "1.12.1"
 dotenvy = "0.15.7"
 futures = "0.3.34"
+# kax-context (ADR 0009): percurso com .gitignore.
+ignore = "0.4.34"
 notify = "8.2.1"
 # TLS via rustls + ring (sem openssl, sem aws-lc-rs) — ver ADR 0002.
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "http2", "json", "stream"] }
@@ -25,6 +27,14 @@ toml = { version = "1.1.8", features = ["preserve_order"] }
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter", "ansi"] }
+# kax-context (ADR 0009): gramáticas em C compiladas pelo `cc` (cl.exe do MSVC no
+# Windows); xxh3 para invalidar o índice por hash de arquivo.
+tree-sitter = "0.27.1"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-python = "0.25.0"
+tree-sitter-rust = "0.24.2"
+tree-sitter-typescript = "0.23.2"
+xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

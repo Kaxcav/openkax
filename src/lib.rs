@@ -2,6 +2,7 @@
 //!
 //! Mapa dos módulos (PLANO_MESTRE §1):
 //! - [`config`]: `providers.toml` (provider = dado).
+//! - [`context`]: `kax-context`, contexto enxuto por símbolo para os pacotes (P6, ADR 0009).
 //! - [`scheduler`]: buckets RPM/TPM/RPD/TPD, estado por provider, escolha de candidatos.
 //! - [`provider`]: cliente HTTP OpenAI-compat genérico + classificação de erros.
 //! - [`translate`]: tipos de fio OpenAI/Anthropic e conversão entre eles.
@@ -14,6 +15,7 @@
 //! - [`platform`]: integração com o SO atrás do trait `Platform` (ADR 0001).
 
 pub mod config;
+pub mod context;
 pub mod doctor;
 pub mod ledger;
 pub mod mcp;

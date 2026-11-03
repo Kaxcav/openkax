@@ -12,6 +12,8 @@ Gateway/proxy local de IA em Rust (binário único Windows, < 8 MB, memória pri
 Modo B (MCP com pacote enxuto) é o principal. Modo A (rewrite de modelo via `ANTHROPIC_DEFAULT_HAIKU_MODEL`) é bônus.
 
 ## Fase atual
+**Em andamento (2026-11-03): P6 kax-context** (ADR 0009, `src/context/`): contexto enxuto por símbolo para os pacotes. P6a (CONTRACT) em revisão no PR draft `feat/context-contract`; P6b (adapters TS/JS e Python), P6c (adapter Rust, índice, resolução, pack) e P6d (ligar `files[].symbols`/`lines` ao pacote) a fazer. Aceite: `cargo test -- --ignored` em `tests/context_rust.rs` (P6c) e `tests/context_ts_py.rs` (P6b).
+
 **Fase 1 — Ponte Anthropic** (branch `fase-1`; a Fase 0 já está na `main`). Critério de saída no `PLANO_MESTRE.md` §4 e tarefas F1-* em `docs/noturno/RUNBOOK.md`.
 Progresso (2026-11-02): Tarefas F1-1 a F1-7 concluídas; F1-8 (documentação, ADR 0006 aceito e roteiro de aceite manual) em revisão.
 - F1-1..F1-4: Tipos e tradução Anthropic ↔ OpenAI, endpoint `POST /v1/messages` para classes `kax/*` (stream/não-stream), fallback pré-1º-token, assinaturas Gemini (`thought_signatures`) e quirks (`alnum9`).

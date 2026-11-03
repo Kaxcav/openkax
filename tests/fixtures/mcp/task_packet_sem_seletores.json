@@ -1,0 +1,36 @@
+{
+  "id": "T-1",
+  "class": "kax/coder-smart",
+  "objective": "Implementar o adapter",
+  "files": [
+    {
+      "path": "src/a.rs",
+      "mode": "read",
+      "exists": true
+    },
+    {
+      "path": "src/b.rs",
+      "mode": "read",
+      "exists": true
+    },
+    {
+      "path": "src/new.rs",
+      "mode": "write",
+      "exists": false
+    }
+  ],
+  "contracts": [
+    "trait X { fn f(&self); }"
+  ],
+  "constraints": [
+    "sem novas dependências"
+  ],
+  "accept": {
+    "verify": [
+      "cargo check"
+    ],
+    "expect": "exit 0"
+  },
+  "output": "unified_diff",
+  "max_attempts": 2
+}
