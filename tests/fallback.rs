@@ -633,3 +633,160 @@ async fn pinned_429_keeps_retry_after() {
     assert_eq!(r.status(), 429);
     assert_eq!(r.headers()["retry-after"], "30");
 }
+
+fn single_provider_config(url: &str) -> String {
+    format!(
+        r#"
+        [defaults]
+        request_timeout_ms = 5000
+        first_token_timeout_ms = 1000
+        estimate_chars_per_token = 3.6
+
+        [[provider]]
+        id = "mock"
+        base_url = "{url}"
+        auth = {{ kind = "bearer", env = "MOCK_KEY" }}
+        models = [{{ id = "m1", upstream = "upstream-m1", max_ctx = 128000, limits = {{ rpm = 30, tpm = 8000 }} }}]
+
+        [[class]]
+        id = "kax/test-log"
+        max_packet_tokens = 60000
+        route = [{{ provider = "mock", model = "m1" }}]
+        "#
+    )
+}
+
+const MOCK_SECRETS: &[(&str, &str)] = &[("MOCK_KEY", "k-mock")];
+
+#[derive(Clone)]
+struct TestLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for TestLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TestLogWriter {
+    type Writer = TestLogWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// A1: pré-1º-token não vaza mensagem do upstream no log e inclui kind/status.
+#[test]
+fn log_does_not_leak_upstream_error_message_pre_first_token() {
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer = TestLogWriter(buf.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(writer)
+        .with_ansi(false)
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mock = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .respond_with(
+                    ResponseTemplate::new(500)
+                        .set_body_json(json!({ "error": { "message": "SEGREDO-DO-PROMPT-123" } })),
+                )
+                .expect(1)
+                .mount(&mock)
+                .await;
+
+            let gw = Gateway::spawn(&single_provider_config(&mock.uri()), MOCK_SECRETS).await;
+            let _ = gw
+                .http
+                .post(format!("{}/v1/chat/completions", gw.base))
+                .json(&json!({ "model": "kax/test-log", "stream": true, "messages": [{ "role": "user", "content": "oi" }] }))
+                .send()
+                .await;
+
+            mock.verify().await;
+        });
+    });
+
+    let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(
+        !output.contains("SEGREDO-DO-PROMPT-123"),
+        "log vazou texto confidencial do upstream: {output}"
+    );
+    assert!(
+        output.contains("http_5xx"),
+        "kind=http_5xx esperado no log: {output}"
+    );
+    assert!(
+        output.contains("500"),
+        "status=500 esperado no log: {output}"
+    );
+}
+
+/// A1: pós-1º-token não vaza mensagem do upstream no log e inclui kind.
+#[test]
+fn log_does_not_leak_upstream_error_message_post_first_token() {
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer = TestLogWriter(buf.clone());
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(writer)
+        .with_ansi(false)
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let mock = MockServer::start().await;
+            let body = [
+                chunk(json!({ "role": "assistant" }), None),
+                chunk(json!({ "content": "primeiro token" }), None),
+                format!(
+                    "data: {}\n\n",
+                    json!({ "error": { "message": "SEGREDO-DO-PROMPT-456" } })
+                ),
+            ]
+            .concat();
+
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .respond_with(sse_raw(body))
+                .expect(1)
+                .mount(&mock)
+                .await;
+
+            let gw = Gateway::spawn(&single_provider_config(&mock.uri()), MOCK_SECRETS).await;
+            let r = gw
+                .http
+                .post(format!("{}/v1/chat/completions", gw.base))
+                .json(&json!({ "model": "kax/test-log", "stream": true, "messages": [{ "role": "user", "content": "oi" }] }))
+                .send()
+                .await
+                .unwrap();
+
+            let _ = r.text().await;
+            mock.verify().await;
+        });
+    });
+
+    let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(
+        !output.contains("SEGREDO-DO-PROMPT-456"),
+        "log vazou texto confidencial do upstream: {output}"
+    );
+    assert!(
+        output.contains("mid_stream"),
+        "kind=mid_stream esperado no log: {output}"
+    );
+}

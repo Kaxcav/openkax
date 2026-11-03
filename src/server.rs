@@ -679,7 +679,8 @@ async fn dispatch(
                 tracing::warn!(
                     provider = %cand.provider_id,
                     model = %cand.model_id,
-                    error = %e,
+                    kind = e.kind(),
+                    status = ?e.status(),
                     "candidato falhou antes do 1º token"
                 );
                 if fault.is_some() {
@@ -998,7 +999,7 @@ impl Relay {
 
     fn finish_err(&mut self, e: &UpstreamError) {
         self.finished = true;
-        tracing::warn!(provider = %self.cand.provider_id, model = %self.cand.model_id, error = %e, "stream interrompido após o 1º token");
+        tracing::warn!(provider = %self.cand.provider_id, model = %self.cand.model_id, kind = e.kind(), status = ?e.status(), "stream interrompido após o 1º token");
         if let Some(r) = self.res.take() {
             r.fail(e);
         }
