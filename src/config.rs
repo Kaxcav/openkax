@@ -1000,6 +1000,7 @@ mod tests {
                 "gemini/gemini-flash",
                 "openrouter/gemma-4-31b",
                 "cloudflare/llama-4-scout",
+                "deepseek/deepseek-flash",
             ]
         );
         assert_eq!(

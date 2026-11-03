@@ -241,6 +241,8 @@ route = [
   { provider = "gemini", model = "gemini-flash" },
   { provider = "openrouter", model = "gemma-4-31b" },
   { provider = "cloudflare", model = "llama-4-scout" },
+  # Pago, último: no S1a dois `exhausted` com todos os free esgotados ao mesmo tempo.
+  { provider = "deepseek", model = "deepseek-flash" },
 ]
 
 [[class]]
