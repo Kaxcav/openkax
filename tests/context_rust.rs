@@ -401,7 +401,6 @@ fn rust_inline_module_and_duplicate_ids() {
 // ----------------------------------------------------------------- índice --
 
 #[test]
-#[ignore = "P6c"]
 fn index_outline_lists_symbols_in_source_order() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -462,7 +461,6 @@ fn index_outline_lists_symbols_in_source_order() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn symbol_finds_the_definition_with_exact_lines() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -493,7 +491,6 @@ fn symbol_finds_the_definition_with_exact_lines() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn same_name_in_two_modules_is_flagged_ambiguous() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -1000,7 +997,6 @@ fn refresh_reparses_only_the_changed_file() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn walk_respects_gitignore_hidden_and_kax() {
     let d = workdir();
     let root = d.path();
@@ -1034,7 +1030,6 @@ fn walk_respects_gitignore_hidden_and_kax() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn crlf_is_normalized_and_limits_skip_files() {
     let d = tempfile::tempdir().unwrap();
     let root = d.path();

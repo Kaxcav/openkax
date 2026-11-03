@@ -17,9 +17,12 @@
 //! 4. No melhor degrau com candidatos: 1 → [`Resolution::Resolved`];
 //!    vários → [`Resolution::Ambiguous`]. Nunca escolhe entre empatados.
 
+use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
-use super::{ContextError, FileFacts, Ref, SymbolId};
+use super::{ContextError, FileFacts, Ref, Symbol, SymbolId, adapter_for};
 
 /// Degrau de proximidade em que a definição foi achada (do mais perto ao mais
 /// longe; a ordem do `enum` é a da preferência).
@@ -62,11 +65,43 @@ impl Resolution {
     }
 }
 
+/// Sintaxe de caminho da linguagem de um arquivo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Syntax {
+    Rust,
+    Ts,
+    Py,
+    Other,
+}
+
+impl Syntax {
+    pub(crate) fn of(file: &str) -> Self {
+        match adapter_for(Path::new(file)).map(|a| a.id()) {
+            Some("rust") => Self::Rust,
+            Some("typescript" | "javascript") => Self::Ts,
+            Some("python") => Self::Py,
+            _ => Self::Other,
+        }
+    }
+
+    /// Separador do `qual_name`.
+    pub(crate) fn sep(self) -> &'static str {
+        match self {
+            Self::Rust => "::",
+            _ => ".",
+        }
+    }
+}
+
 /// Tabela global de definições e imports, atualizada arquivo a arquivo (um
 /// arquivo alterado sai e entra de novo, sem reconstruir o resto).
 #[derive(Debug, Clone, Default)]
 pub struct SymbolTable {
-    files: std::collections::BTreeMap<String, FileFacts>,
+    files: BTreeMap<String, FileFacts>,
+    /// Nome curto → ids, em ordem de id.
+    by_name: HashMap<String, Vec<SymbolId>>,
+    /// Id → arquivo e posição em `FileFacts::symbols`.
+    by_id: HashMap<SymbolId, (String, usize)>,
 }
 
 impl SymbolTable {
@@ -83,30 +118,146 @@ impl SymbolTable {
         self.files.is_empty()
     }
 
+    /// Símbolos de todos os arquivos.
+    pub fn symbol_count(&self) -> usize {
+        self.by_id.len()
+    }
+
     /// Insere (ou troca) os fatos de `file`.
-    pub fn insert_file(&mut self, _file: &str, _facts: FileFacts) -> Result<(), ContextError> {
-        Err(ContextError::NotImplemented(
-            "P6c: SymbolTable::insert_file",
-        ))
+    pub fn insert_file(&mut self, file: &str, facts: FileFacts) -> Result<(), ContextError> {
+        self.remove_file(file)?;
+        for (i, s) in facts.symbols.iter().enumerate() {
+            self.by_id.insert(s.id.clone(), (file.to_string(), i));
+            let ids = self.by_name.entry(s.name.clone()).or_default();
+            if let Err(at) = ids.binary_search(&s.id) {
+                ids.insert(at, s.id.clone());
+            }
+        }
+        self.files.insert(file.to_string(), facts);
+        Ok(())
     }
 
     /// Tira `file` e tudo o que ele definia.
-    pub fn remove_file(&mut self, _file: &str) -> Result<(), ContextError> {
-        Err(ContextError::NotImplemented(
-            "P6c: SymbolTable::remove_file",
-        ))
+    pub fn remove_file(&mut self, file: &str) -> Result<(), ContextError> {
+        let Some(facts) = self.files.remove(file) else {
+            return Ok(());
+        };
+        for s in facts.symbols {
+            self.by_id.remove(&s.id);
+            if let Some(ids) = self.by_name.get_mut(&s.name) {
+                ids.retain(|id| *id != s.id);
+                if ids.is_empty() {
+                    self.by_name.remove(&s.name);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Fatos de `file`.
+    pub fn file(&self, file: &str) -> Option<&FileFacts> {
+        self.files.get(file)
+    }
+
+    /// Todos os arquivos, em ordem de caminho.
+    pub fn files(&self) -> impl Iterator<Item = (&str, &FileFacts)> {
+        self.files.iter().map(|(f, facts)| (f.as_str(), facts))
+    }
+
+    /// Definição de `id`.
+    pub fn symbol(&self, id: &SymbolId) -> Option<&Symbol> {
+        let (file, i) = self.by_id.get(id)?;
+        self.files.get(file)?.symbols.get(*i)
     }
 
     /// Definições que casam com a query (nome, caminho qualificado por sufixo
     /// ou id), em ordem de id.
-    pub fn lookup(&self, _query: &str) -> Result<Vec<SymbolId>, ContextError> {
-        Err(ContextError::NotImplemented("P6c: SymbolTable::lookup"))
+    ///
+    /// É id quando o 1º segmento antes de `::` termina numa extensão com
+    /// adapter (`src/store.rs::validate`). O nome inteiro também vale, para o
+    /// `impl fmt::Display for X` ser achado pelo cabeçalho.
+    pub fn lookup(&self, query: &str) -> Result<Vec<SymbolId>, ContextError> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some((first, _)) = q.split_once("::")
+            && adapter_for(Path::new(first)).is_some()
+        {
+            let id = SymbolId(q.to_string());
+            return Ok(if self.by_id.contains_key(&id) {
+                vec![id]
+            } else {
+                Vec::new()
+            });
+        }
+        let mut out = self.by_name.get(q).cloned().unwrap_or_default();
+        let segs: Vec<&str> = q
+            .split("::")
+            .flat_map(|p| p.split('.'))
+            .filter(|s| !s.is_empty())
+            .collect();
+        if segs.len() > 1
+            && let Some(ids) = segs.last().and_then(|n| self.by_name.get(*n))
+        {
+            for id in ids {
+                if let Some(s) = self.symbol(id)
+                    && ends_with(&self.full_path(s), &segs)
+                {
+                    out.push(id.clone());
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
+    /// Módulo do arquivo mais os contêineres do `qual_name`, sem o nome:
+    /// `["geometry", "Rect"]` para `Rect::new` em `src/geometry.rs`.
+    pub(crate) fn container(&self, s: &Symbol) -> Vec<String> {
+        let mut v = self
+            .files
+            .get(&s.file)
+            .map(|f| f.module.clone())
+            .unwrap_or_default();
+        let sep = Syntax::of(&s.file).sep();
+        let prefix = match s.qual_name.strip_suffix(s.name.as_str()) {
+            Some("") => Some(""),
+            Some(p) => p.strip_suffix(sep),
+            None => None,
+        };
+        match prefix {
+            Some(p) => v.extend(p.split(sep).filter(|x| !x.is_empty()).map(String::from)),
+            None => {
+                let mut parts: Vec<&str> = s.qual_name.split(sep).collect();
+                parts.pop();
+                v.extend(parts.into_iter().map(String::from));
+            }
+        }
+        v
+    }
+
+    /// [`Self::container`] mais o nome.
+    pub(crate) fn full_path(&self, s: &Symbol) -> Vec<String> {
+        let mut v = self.container(s);
+        v.push(s.name.clone());
+        v
     }
 
     /// Liga um sítio a uma definição (algoritmo no topo do módulo).
     pub fn resolve(&self, _r: &Ref) -> Result<Resolution, ContextError> {
         Err(ContextError::NotImplemented("P6c: SymbolTable::resolve"))
     }
+}
+
+/// `path` termina com os segmentos `segs`.
+fn ends_with(path: &[String], segs: &[&str]) -> bool {
+    path.len() >= segs.len()
+        && path[path.len() - segs.len()..]
+            .iter()
+            .zip(segs)
+            .all(|(a, b)| a == b)
 }
 
 #[cfg(test)]
