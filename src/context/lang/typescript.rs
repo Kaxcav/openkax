@@ -286,11 +286,16 @@ fn extract_imports(root: tree_sitter::Node, src: &str, file: &str, facts: &mut F
     let mut cursor = tree_sitter::QueryCursor::new();
     let mut matches = cursor.matches(&query, root, src.as_bytes());
 
-    let src_idx = query.capture_index_for_name("src").unwrap();
-    let import_idx = query.capture_index_for_name("import").unwrap();
-    let export_idx = query.capture_index_for_name("export").unwrap();
-    let call_req_idx = query.capture_index_for_name("call_req").unwrap();
-    let fn_name_idx = query.capture_index_for_name("fn_name").unwrap();
+    // Os nomes vêm da query acima; `None` só se ela mudar sem acompanhar aqui.
+    let (Some(src_idx), Some(import_idx), Some(export_idx), Some(call_req_idx), Some(fn_name_idx)) = (
+        query.capture_index_for_name("src"),
+        query.capture_index_for_name("import"),
+        query.capture_index_for_name("export"),
+        query.capture_index_for_name("call_req"),
+        query.capture_index_for_name("fn_name"),
+    ) else {
+        return;
+    };
 
     while let Some(m) = matches.next() {
         let mut node_import = None;
