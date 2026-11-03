@@ -231,11 +231,16 @@ route = [
 [[class]]
 id = "kax/summarizer"
 max_packet_tokens = 200000
+# Smoke S1a 2026-11-03 (Explore do Claude Code no Modo A): ~25 chamadas em rajada
+# (~1/s) por Explore; gemini (10 rpm, 250 rpd) esgota em segundos. Codestral
+# (125 rpm, 625k tpm) absorve a rajada e aceita tool → user do Claude Code.
+# Cloudflare no fim: duas mortes no meio do stream com ~30k de entrada.
 route = [
   { provider = "gemini", model = "gemini-flash-lite" },
+  { provider = "mistral", model = "codestral" },
   { provider = "gemini", model = "gemini-flash" },
-  { provider = "cloudflare", model = "llama-4-scout" },
   { provider = "openrouter", model = "gemma-4-31b" },
+  { provider = "cloudflare", model = "llama-4-scout" },
 ]
 
 [[class]]
