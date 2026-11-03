@@ -655,7 +655,7 @@ fn module_path(source: &str, file: &str, syn: Syntax) -> PathFilter {
 }
 
 /// Tipo de um `impl` pelo cabeçalho: `Rect` em `impl Shape for Rect`.
-fn impl_self_type(name: &str) -> String {
+pub(crate) fn impl_self_type(name: &str) -> String {
     let ty = match name.rsplit_once(" for ") {
         Some((_, t)) => t,
         None => name.strip_prefix("impl ").unwrap_or(name),

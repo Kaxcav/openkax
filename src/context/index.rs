@@ -390,13 +390,37 @@ impl Index {
 
     /// Pacote de contexto dos `targets` (queries; cada uma precisa casar com
     /// uma definição só) dentro de `budget_tokens`.
+    ///
+    /// Query sem definição → [`ContextError::UnknownSymbol`]; com mais de uma
+    /// → [`ContextError::AmbiguousTarget`] (o lead qualifica); corpo dos
+    /// alvos acima do orçamento → [`ContextError::BudgetTooSmall`].
     pub fn pack(
         &self,
-        _targets: &[&str],
-        _budget_tokens: u32,
-        _chars_per_token: f64,
+        targets: &[&str],
+        budget_tokens: u32,
+        chars_per_token: f64,
     ) -> Result<ContextPack, ContextError> {
-        Err(ContextError::NotImplemented("P6c: Index::pack"))
+        let mut ids = Vec::with_capacity(targets.len());
+        for q in targets {
+            let mut found = self.table.lookup(q)?;
+            match found.len() {
+                0 => return Err(ContextError::UnknownSymbol((*q).to_string())),
+                1 => ids.push(found.remove(0)),
+                _ => {
+                    return Err(ContextError::AmbiguousTarget {
+                        query: (*q).to_string(),
+                        candidates: found,
+                    });
+                }
+            }
+        }
+        super::pack::build(
+            &self.table,
+            &|f: &str| self.source(f),
+            &ids,
+            budget_tokens,
+            chars_per_token,
+        )
     }
 
     /// Texto normalizado de `file`, conferido contra o hash do `refresh`.

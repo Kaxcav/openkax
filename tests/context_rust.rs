@@ -1,9 +1,8 @@
 //! Aceite do `kax-context` para Rust, índice, resolução e pack (ADR 0009).
 //!
-//! CONTRACT (P6a): os testes `#[ignore = "P6c"]` descrevem o comportamento
-//! que a P6c entrega; com os stubs eles falham (`cargo test -- --ignored`).
-//! A fixture é um crate de verdade (`tests/fixtures/context/rust`, confere com
-//! `cargo check --manifest-path`); linhas citadas abaixo são as dela.
+//! Escritos no CONTRACT (P6a) e ligados na P6c. A fixture é um crate de
+//! verdade (`tests/fixtures/context/rust`, confere com `cargo check
+//! --manifest-path`); linhas citadas abaixo são as dela.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -705,7 +704,6 @@ fn layout(p: &ContextPack) -> Vec<(PackRole, &str, [u32; 2], Fidelity)> {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn pack_with_room_has_the_four_priorities() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -769,7 +767,6 @@ fn pack_with_room_has_the_four_priorities() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn pack_small_budget_keeps_the_target_and_lists_omitted() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -807,7 +804,6 @@ fn pack_small_budget_keeps_the_target_and_lists_omitted() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn pack_fills_in_priority_order() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -833,7 +829,6 @@ fn pack_fills_in_priority_order() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn pack_refuses_what_it_cannot_honour() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -864,7 +859,6 @@ fn pack_refuses_what_it_cannot_honour() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn pack_does_not_repeat_targets_or_shared_types() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -907,7 +901,6 @@ fn pack_does_not_repeat_targets_or_shared_types() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn pack_lists_an_ambiguous_dependency_instead_of_guessing() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -945,6 +938,53 @@ fn pack_lists_an_ambiguous_dependency_instead_of_guessing() {
             ]
         }
     );
+}
+
+/// Trechos `full` que se tocam no mesmo arquivo saem fundidos, com o papel
+/// de maior prioridade; o dono que conteria o alvo (o trait de um método
+/// com corpo) entra só pela assinatura.
+#[test]
+fn pack_merges_touching_excerpts_and_signs_the_enclosing_owner() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path();
+    fs::create_dir_all(root.join("src")).unwrap();
+    let src = "/// A.\npub struct A;\npub fn f(a: A) -> A {\n    a\n}\n\npub trait T {\n    fn g(&self) -> u8 {\n        1\n    }\n}\n";
+    fs::write(root.join("src/lib.rs"), src).unwrap();
+    let idx = indexed(root);
+
+    let p = idx.pack(&["f"], 4000, CPT).unwrap();
+    assert_eq!(
+        layout(&p),
+        [(PackRole::Target, "src/lib.rs::f", [1, 5], Fidelity::Full)]
+    );
+    assert_eq!(
+        p.excerpts[0].text,
+        src.lines()
+            .take(5)
+            .map(|l| format!("{l}\n"))
+            .collect::<String>()
+    );
+    assert_eq!(p.tokens_estimated, tokens(&p.excerpts[0].text));
+
+    let p = idx.pack(&["T::g"], 4000, CPT).unwrap();
+    assert_eq!(
+        layout(&p),
+        [
+            (
+                PackRole::Target,
+                "src/lib.rs::T::g",
+                [8, 10],
+                Fidelity::Full
+            ),
+            (
+                PackRole::TypeDef,
+                "src/lib.rs::T",
+                [7, 7],
+                Fidelity::Signature
+            ),
+        ]
+    );
+    assert_eq!(p.excerpts[1].text, "pub trait T");
 }
 
 // ----------------------------------------------------------- incremental --
