@@ -117,7 +117,6 @@ fn rust_fixture_parses_cleanly() {
 // ---------------------------------------------------------------- adapter --
 
 #[test]
-#[ignore = "P6c"]
 fn rust_outline_of_geometry() {
     let src = read("src/geometry.rs");
     let facts = RustAdapter.extract(Path::new("src/geometry.rs"), &src);
@@ -228,7 +227,6 @@ fn rust_outline_of_geometry() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn rust_refs_and_imports_of_store() {
     let src = read("src/store.rs");
     let facts = RustAdapter.extract(Path::new("src/store.rs"), &src);
@@ -334,7 +332,6 @@ fn rust_refs_and_imports_of_store() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn rust_lib_module_and_mod_declarations() {
     let src = read("src/lib.rs");
     let facts = RustAdapter.extract(Path::new("src/lib.rs"), &src);
@@ -361,7 +358,6 @@ fn rust_lib_module_and_mod_declarations() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn rust_syntax_error_is_counted_not_fatal() {
     let facts = RustAdapter.extract(Path::new("src/broken.rs"), "pub fn ok() {}\npub fn x( {\n");
     assert!(facts.parse_errors > 0);
@@ -372,7 +368,6 @@ fn rust_syntax_error_is_counted_not_fatal() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn rust_inline_module_and_duplicate_ids() {
     let src = "mod inner {\n    pub fn f() {}\n}\n\nstruct S;\nimpl S {\n    fn g() {}\n}\nimpl S {\n    fn g() {}\n}\n";
     let facts = RustAdapter.extract(Path::new("src/dup.rs"), src);

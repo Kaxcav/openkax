@@ -8,6 +8,7 @@
 
 mod python;
 mod rust;
+pub(crate) mod support;
 mod typescript;
 
 use std::path::Path;
