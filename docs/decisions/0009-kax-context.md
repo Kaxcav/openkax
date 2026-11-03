@@ -203,8 +203,8 @@ ao `build_request` e medir (≥ 3× menor, com aceitação ≥ a de hoje).
   `context::lang::tests::grammars_load`); no Linux, pelo CI.
 - **O binário fica maior.** Isso foi aceito pela decisão do Kaxcav de
   2026-11-03, que tirou os limites de 8 MB de binário e 10 MB de memória
-  privada como portão (passam a ser métrica informativa). **Pendência:** essa
-  decisão ainda não está escrita no ADR 0002, no PLANO §3.1 nem no §4.
+  privada como critério de aceite (passam a ser métrica informativa). A
+  decisão está no ADR 0002 (seção "Revisão 2026-11-03") e no PLANO §3.1 e §4.
   - Medido já no CONTRACT (`.exe` release local, Windows/MSVC): **4.180.992 B
     na `main` → 4.564.480 B nesta branch (+383.488 B)**, sem nenhuma gramática
     no binário (nenhuma string delas aparece no `.exe`). O aumento vem da
