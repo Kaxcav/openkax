@@ -690,6 +690,7 @@ mod tests {
         match r.messages[1].content.as_ref().unwrap() {
             MessageContent::Text(t) => t.clone(),
             MessageContent::Parts(_) => panic!("esperava texto"),
+            MessageContent::Null => panic!("esperava texto"),
         }
     }
 
