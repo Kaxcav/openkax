@@ -1,0 +1,249 @@
+# providers.toml — provider é dado, não código (PLANO_MESTRE §3.2, ADR 0003).
+# Limites são voláteis (nov/2026): `openkax doctor` / `./doctor.sh` para conferir.
+# Chaves NUNCA aqui: só o nome da variável de ambiente em `auth.env`.
+#
+# Tiers (ADR 0004): free → credit → paid, nesta ordem em toda rota (validado no parse).
+# `${VAR}` em base_url/extra_headers é resolvido do ambiente; ausente → provider Disabled.
+#
+# Escopos de limite (ADR 0003):
+#   [[provider]].limits      → compartilhado pela conta/workspace (Mistral, OpenRouter, DeepSeek)
+#   models[].limits/max_ctx  → por modelo (Groq, Gemini, Mistral, SambaNova)
+# `models[].id` é o nome local usado nas rotas; `upstream` é o ID real, conferido em /models.
+
+[defaults]
+request_timeout_ms = 60000
+first_token_timeout_ms = 8000
+estimate_chars_per_token = 3.6     # chute inicial; recalibrado por MODELO via `usage` (F0-20)
+safety_factor = 1.0
+daily_reset_utc = "00:00"          # reset de RPD/TPD quando o escopo não define `limits.reset_utc`
+
+[[provider]]
+id = "gemini"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+auth = { kind = "bearer", env = "GEMINI_API_KEY" }
+# Free tier limita por modelo. Números do plano §1.2; conferir no AI Studio.
+models = [
+  # Smoke F0-14: thinking sem deltas de raciocínio no stream → 8 s não bastam (F0-18).
+  { id = "gemini-flash", upstream = "gemini-flash-latest", max_ctx = 1000000, limits = { rpm = 10, tpm = 250000, rpd = 250 }, family = "gemini", first_token_timeout_ms = 20000 },
+  { id = "gemini-flash-lite", upstream = "gemini-flash-lite-latest", max_ctx = 1000000, limits = { rpm = 10, tpm = 250000, rpd = 250 }, family = "gemini" },
+]
+quirks = { strip_params = ["logprobs", "frequency_penalty"], tool_choice = "auto_only" }
+# Sem reasoning_effort (F0-18): em 2026-11-02 gemini-flash-latest = gemini-3.8-flash
+# (modelVersion), e a tabela da doc de compatibilidade OpenAI só define valores para
+# Gemini 4 Argon, 3.1 Flash-Lite, 3 Flash e 2.5. Reavaliar quando a doc citar o 3.8.
+cooldown = { on_429_s = 60, on_5xx_s = 20, on_timeout_s = 30, on_4xx_other_s = 600 }
+
+[[provider]]
+id = "groq"
+base_url = "https://api.groq.com/openai/v1"
+auth = { kind = "bearer", env = "GROQ_API_KEY" }
+# F0-21 (PC de casa, sem a rede do notebook): /models em 2026-11-02 não tem mais
+# qwen-coder nem llama 70B; o Qwen do catálogo é qwen/qwen3.8-27b (ctx 131072).
+# Limites pelos headers de um chat real: x-ratelimit-limit-requests=1000 (dia),
+# x-ratelimit-limit-tokens=8000 (minuto). RPM não vem em header: 30 do free tier.
+models = [
+  { id = "qwen3.8-27b", upstream = "qwen/qwen3.8-27b", max_ctx = 131072, limits = { rpm = 30, tpm = 8000, rpd = 1000 }, family = "qwen" },
+]
+# Groq conta max_tokens no TPM: reserva entrada + min(max_tokens, cap) e clampa no cap.
+# 6000 (pacote máx. do coder-fast) + 2000 = 8000 TPM.
+# reasoning_effort "none" (console.groq.com/docs/reasoning, Qwen 3.8 27B): sem ele o
+# default reasoning_format=raw poria <think> no content.
+quirks = { tpm_counts_max_tokens = true, max_tokens_cap = 2000, disable_thinking = { reasoning_effort = "none" }, ratelimit_headers = { rpd = "x-ratelimit-remaining-requests", tpm = "x-ratelimit-remaining-tokens" } }
+
+[[provider]]
+id = "mistral"
+base_url = "https://api.mistral.ai/v1"
+auth = { kind = "bearer", env = "MISTRAL_API_KEY" }
+# Smoke 2026-11-02 (headers reais): limites são POR MODELO.
+#   codestral:      x-ratelimit-limit-req-minute=125, x-ratelimit-limit-tokens-minute=625000
+#   mistral-medium: x-ratelimit-limit-req-minute=0 → indisponível no free tier; fora das rotas.
+models = [
+  { id = "codestral", upstream = "codestral-latest", family = "mistral", limits = { rpm = 125, tpm = 625000 } },
+  { id = "mistral-medium", upstream = "mistral-medium-latest", family = "mistral" },
+]
+limits = { tokens_per_month = 1000000000 }
+quirks = { ratelimit_headers = { rpm = "x-ratelimit-remaining-req-minute", tpm = "x-ratelimit-remaining-tokens-minute" } }
+
+[[provider]]
+id = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+auth = { kind = "bearer", env = "OPENROUTER_API_KEY" }
+extra_headers = { "HTTP-Referer" = "http://localhost", "X-Title" = "OpenKax" }
+# Os :free do plano (qwen3-coder, deepseek-chat) sumiram do catálogo; estes estão em /models.
+models = [
+  { id = "north-mini-code", upstream = "cohere/north-mini-code:free", max_ctx = 256000, family = "cohere" },
+  { id = "gemma-4-31b", upstream = "google/gemma-4-31b-it:free", max_ctx = 262144, family = "gemma" },
+]
+limits = { rpm = 20, rpd = 1000 }
+
+[[provider]]
+id = "deepseek"
+base_url = "https://api.deepseek.com/v1"
+auth = { kind = "bearer", env = "DEEPSEEK_API_KEY" }
+# deepseek-chat não está mais em /models; atuais: deepseek-flash, deepseek-v4-pro.
+models = [
+  { id = "deepseek-flash", upstream = "deepseek-flash", family = "deepseek" },
+  { id = "deepseek-pro", upstream = "deepseek-v4-pro", family = "deepseek" },
+]
+limits = { rpm = 60 }
+tier = "paid"
+
+# ------------------------------------------------- providers de cauda (ADR 0004)
+# IDs conferidos em /models em 2026-11-02 (Cohere: API nativa /v1/models).
+
+[[provider]]
+id = "nvidia"
+base_url = "https://integrate.api.nvidia.com/v1"
+auth = { kind = "bearer", env = "NVIDIA_API_KEY" }
+# 40 RPM por conta. Natureza dos créditos incerta: o doctor mede. Sem max_ctx no /models.
+# Smoke 2026-11-02: moonshotai/kimi-k2.6 aparece em /models mas responde 404 → removido.
+# Fila compartilhada: 1º token passa de 8 s com frequência (F0-18) → 20 s por modelo.
+models = [
+  { id = "minimax-m3.1-flash", upstream = "minimaxai/minimax-m3.1-flash", family = "minimax", first_token_timeout_ms = 20000 },
+  { id = "deepseek-v4.1-flash", upstream = "deepseek-ai/deepseek-v4.1-flash", family = "deepseek", first_token_timeout_ms = 20000 },
+  { id = "gpt-oss-20b", upstream = "openai/gpt-oss-20b", family = "gpt", first_token_timeout_ms = 20000 },
+]
+limits = { rpm = 40 }
+
+[[provider]]
+id = "zai"
+base_url = "https://api.z.ai/api/paas/v4"
+auth = { kind = "bearer", env = "ZAI_API_KEY" }
+# ~1 req/s e concorrência baixa nos flash. glm-4.7-flash/glm-4.5-flash NÃO aparecem
+# em /models (lista: glm-5.3-flash, glm-5.3-flashx, …): o smoke decide.
+models = [
+  { id = "glm-4.7-flash", upstream = "glm-4.7-flash", max_ctx = 128000, family = "glm", limits = { rpm = 60, max_concurrent = 1 } },
+  { id = "glm-4.5-flash", upstream = "glm-4.5-flash", max_ctx = 128000, family = "glm", limits = { rpm = 60, max_concurrent = 1 } },
+]
+# Parâmetro documentado (docs.z.ai, chat-completion): thinking.type = "disabled".
+quirks = { disable_thinking = { thinking = { type = "disabled" } } }
+
+[[provider]]
+id = "sambanova"
+base_url = "https://api.sambanova.ai/v1"
+auth = { kind = "bearer", env = "SAMBANOVA_API_KEY" }
+# Limite por modelo: 20 RPM, 20 RPD, 200k TPD. max_ctx do /models (context_length).
+models = [
+  { id = "deepseek-v3.1", upstream = "DeepSeek-V3.1", max_ctx = 131072, family = "deepseek", limits = { rpm = 20, rpd = 20, tpd = 200000 } },
+  { id = "llama-3.3-70b", upstream = "Meta-Llama-3.3-70B-Instruct", max_ctx = 131072, family = "llama", limits = { rpm = 20, rpd = 20, tpd = 200000 } },
+  { id = "gpt-oss-120b", upstream = "gpt-oss-120b", max_ctx = 131072, family = "gpt", limits = { rpm = 20, rpd = 20, tpd = 200000 } },
+  { id = "minimax-m3.1-flash", upstream = "MiniMax-M3.1-Flash", max_ctx = 1048576, family = "minimax", limits = { rpm = 20, rpd = 20, tpd = 200000 } },
+]
+
+[[provider]]
+id = "cohere"
+base_url = "https://api.cohere.ai/compatibility/v1"
+auth = { kind = "bearer", env = "COHERE_API_KEY" }
+# Trial: 20 RPM, 1000 chamadas/MÊS por chave → rpd = 30 espalha o mês (N6).
+# F0-19: command-a-plus (features: reasoning) vazava "The user says…" no content mesmo
+# com reasoning_effort=none. command-a-03-2025 não tem a feature `reasoning` em
+# /v1/models?endpoint=chat (2026-11-02), então não há raciocínio a desligar.
+models = [
+  { id = "command-a", upstream = "command-a-03-2025", max_ctx = 288000, family = "cohere" },
+]
+limits = { rpm = 20, rpd = 30, requests_per_month = 1000 }
+# Prompt PT-BR em UTF-8 cru → saída degenerada ("W32{A+B}W32…") em 5/10; com \uXXXX,
+# 0/7 (smoke 2026-11-02, mesma request). Só muda a codificação do JSON.
+quirks = { ascii_json = true }
+
+[[provider]]
+id = "cloudflare"
+base_url = "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/v1"
+auth = { kind = "bearer", env = "CLOUDFLARE_API_TOKEN" }
+# ID do catálogo vivo (GET /accounts/$ID/ai/models/search?task=Text Generation, 2026-11-02):
+# sem deprecation/planned_deprecation, sem require_workers_paid, sem raciocínio, ctx 131k.
+# (llama-3.3-70b-instruct-fp8-fast tem só 24k de ctx: curto para o summarizer.)
+models = [
+  { id = "llama-4-scout", upstream = "@cf/meta/llama-4-scout-17b-16e-instruct", max_ctx = 131000, family = "llama" },
+]
+# 10k neurons/dia: pacing por rpd (estimativa grosseira); estourou → 429 diário →
+# cooldown até o reset (A4). Os headers IETF RateLimit/RateLimit-Policy são o limite
+# da API da conta (ex.: 1200 req / 300 s) e viram janela no escopo do provider.
+limits = { rpd = 100 }
+quirks = { ratelimit_headers = { ietf = true } }
+
+[[provider]]
+id = "vercel"
+base_url = "https://ai-gateway.vercel.sh/v1"
+auth = { kind = "bearer", env = "VERCEL_AI_GATEWAY_KEY" }
+tier = "credit"
+# Desligado e fora das rotas (F0-22): exige cartão de crédito cadastrado (403), mesmo para modelo grátis.
+enabled = false
+# Só modelos com pricing input/output = 0 em /v1/models. Limite por modelo (valores reais: doctor).
+models = [
+  { id = "nemotron-3.5-lightning-free", upstream = "nvidia/nemotron-3.5-lightning-free", max_ctx = 1000000, family = "nemotron" },
+  { id = "ling-3.1-flash", upstream = "inclusionai/ling-3.1-flash-1019", max_ctx = 1000000, family = "ling" },
+]
+
+[[provider]]
+id = "anthropic"
+base_url = "https://api.anthropic.com"
+auth = { kind = "passthrough" }        # repassa Authorization/x-api-key do cliente
+native = "anthropic"
+
+# ---------------------------------------------------------------- classes (§1.1, ADR 0004)
+# free → credit → paid sempre (validado no parse).
+
+[[class]]
+id = "kax/coder-fast"
+max_packet_tokens = 6000
+route = [
+  { provider = "groq", model = "qwen3.8-27b" },
+  { provider = "mistral", model = "codestral" },
+  { provider = "zai", model = "glm-4.7-flash" },
+  { provider = "sambanova", model = "deepseek-v3.1" },
+  { provider = "sambanova", model = "llama-3.3-70b" },
+  { provider = "sambanova", model = "gpt-oss-120b" },
+  { provider = "nvidia", model = "minimax-m3.1-flash" },
+  { provider = "gemini", model = "gemini-flash-lite" },
+  { provider = "deepseek", model = "deepseek-flash" },
+]
+
+[[class]]
+id = "kax/coder-smart"
+max_packet_tokens = 60000
+# Haiku (pago) como degrau explícito entra na Fase 1, junto com o translator.
+# F0-20: codestral na frente (125 RPM, 1º token rápido no smoke); gemini-flash
+# (thinking, 1º token lento) passa a 2º.
+route = [
+  { provider = "mistral", model = "codestral" },
+  { provider = "gemini", model = "gemini-flash" },
+  { provider = "nvidia", model = "minimax-m3.1-flash" },
+  { provider = "zai", model = "glm-4.7-flash" },
+  { provider = "sambanova", model = "deepseek-v3.1" },
+  { provider = "openrouter", model = "north-mini-code" },
+  { provider = "deepseek", model = "deepseek-flash" },
+]
+
+[[class]]
+id = "kax/reviewer"
+max_packet_tokens = 60000
+# mistral-medium tem 0 RPM no free tier (smoke): Mistral entra com codestral.
+route = [
+  { provider = "mistral", model = "codestral" },
+  { provider = "cohere", model = "command-a" },
+  { provider = "zai", model = "glm-4.7-flash" },
+  { provider = "nvidia", model = "deepseek-v4.1-flash" },
+  { provider = "gemini", model = "gemini-flash" },
+  { provider = "deepseek", model = "deepseek-pro" },
+]
+
+[[class]]
+id = "kax/summarizer"
+max_packet_tokens = 200000
+route = [
+  { provider = "gemini", model = "gemini-flash-lite" },
+  { provider = "gemini", model = "gemini-flash" },
+  { provider = "cloudflare", model = "llama-4-scout" },
+  { provider = "openrouter", model = "gemma-4-31b" },
+]
+
+[[class]]
+id = "kax/cheap-long"
+max_packet_tokens = 500000
+# nvidia sem max_ctx publicado: o 400 de contexto vira request_fault (A3) e não cooldown.
+route = [
+  { provider = "gemini", model = "gemini-flash" },
+  { provider = "mistral", model = "codestral" },
+  { provider = "nvidia", model = "minimax-m3.1-flash" },
+]

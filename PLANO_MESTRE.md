@@ -58,7 +58,7 @@
 └──────────────────────────────────────────────────────────────────┘
         │
         ▼
- Gemini · Mistral · Groq · GitHub Models · DeepSeek · OpenRouter · Anthropic
+ Gemini · Mistral · Groq · DeepSeek · OpenRouter · Anthropic
 ```
 
 ### 1.1 Classes de modelo (o editor e o lead só conhecem classes)
@@ -81,7 +81,6 @@ Regra: **nenhuma classe `kax/*` roteia para Anthropic exceto como último degrau
 | Gemini (AI Studio) | só Flash/Flash-Lite no free; ~5–15 RPM; 250k TPM; 1M ctx | espinha dorsal das requests gordas |
 | Mistral La Plateforme | 1B tok/mês, 500k TPM, **2 RPM** | request gorda e rara; Codestral |
 | Groq | por modelo, ex. 30 RPM / 1k RPD / **8k TPM** / 200k TPD | só pacotes enxutos (`coder-fast`) |
-| GitHub Models | limites diários baixos por tier | backup de `coder-smart` |
 | Cerebras | virou trial (cartão, 30 dias) | **fora** até mudar |
 | OpenRouter `:free` | 20 RPM; 50 RPD (ou 1k RPD com US$10 lifetime) | pool variado, Tier 3 |
 | DeepSeek direto | pago, centavos | degrau pago "nunca trava" |
@@ -137,7 +136,7 @@ Relatório semanal gerado por `openkax report` a partir do ledger.
 
 - `tokio` (rt-multi-thread, 2 workers), `axum`, `reqwest` (rustls, sem openssl), `serde`/`serde_json`, `toml`, `tracing` + `tracing-appender`, `bytes`, `futures`, `rmcp` (MCP stdio), `notify` (hot-reload do TOML).
 - Sem SQLite na v1: ledger em JSONL (`%LOCALAPPDATA%\OpenKax\ledger\YYYY-MM-DD.jsonl`), estado dos buckets em snapshot JSON a cada 5s e no shutdown.
-- `Cargo.toml` release: `lto = "fat"`, `codegen-units = 1`, `opt-level = "z"`, `panic = "abort"`, `strip = true`. Alvo: binário < 8 MB, RSS ocioso < 10 MB.
+- `Cargo.toml` release: `lto = "fat"`, `codegen-units = 1`, `opt-level = "z"`, `panic = "abort"`, `strip = true`. Alvo: binário < 8 MB e **memória privada** (Private Bytes / commit) < 10 MB **ociosa após uso**. O working set é só informativo: inclui páginas de DLLs compartilhadas do sistema, que o processo não controla (ADR 0002).
 - Windows: `--no-console` (subsystem windows), `openkax tray` opcional na Fase 5, autostart via Task Scheduler.
 
 ### 3.2 `providers.toml` (provider = dado, não código)
@@ -319,7 +318,7 @@ Outras tools: `status(batch_id)`, `quota()` (saldo por provider), `report(period
 ### Fase 0 — Core do gateway (2–3 dias)
 - `axum` + `providers.toml` + hot-reload; `/v1/chat/completions` com classes; scheduler com buckets; fallback pré-1º-token; ledger; `/quota`, `/health`, `/v1/models`.
 - Testes com providers mockados (`wiremock`): 429 → próximo; timeout de 1º token → próximo; erro pós-1º-token → encerra limpo; TPM insuficiente → provider pulado sem request.
-- **Aceite:** Continue/Cline apontados para `kax/coder-fast` e `kax/coder-smart` funcionam com streaming; binário < 8 MB; RSS < 10 MB ocioso.
+- **Aceite:** Continue/Cline apontados para `kax/coder-fast` e `kax/coder-smart` funcionam com streaming; binário < 8 MB; memória privada < 10 MB ociosa após uso (§3.1).
 
 ### Fase 1 — Ponte Anthropic (2–3 dias)
 - `/v1/messages` + `count_tokens`; translator completo (3.5); passthrough `claude-*`.

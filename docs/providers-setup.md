@@ -1,95 +1,88 @@
 # Criação das chaves dos providers
 
-> Atualizado 2026-11-02. UIs mudam; se um botão não estiver onde diz, procure pelo nome entre aspas. Depois de cada chave: `nano .env` → cola → `./doctor.sh`. **Nunca cole chave em chat ou em prompt do Claude Code.**
+> Atualizado 2026-11-02 (alinhado ao ADR 0004 e ao smoke F0-21). UIs mudam; se um botão não estiver onde diz, procure pelo nome entre aspas.
+>
+> Depois de cada chave: edite o `.env` → cola → `./doctor.sh` (Linux/WSL) ou `.\doctor.ps1` (Windows).
 
-## Já feitos
-Gemini, Mistral (La Plateforme), Groq, GitHub Models, OpenRouter (US$10), DeepSeek (US$5).
+## Regras antes de começar
+
+- **Nunca cole chave em chat, em prompt do Claude Code ou em commit.** O `.env` é gitignored; confira com `git check-ignore .env`.
+- **Salve o `.env` com quebra de linha LF.** Valor colado pelo lado Windows com CRLF fica com `\r` no fim e a autenticação falha mesmo com a chave certa. No VS Code/Antigravity: barra inferior → "CRLF" → "LF". No WSL: `sed -i 's/\r$//' .env`. (O gateway tolera CRLF via dotenvy; o `doctor.sh` em bash, não.)
+- Diagnóstico seguro (só nomes e tamanhos, nunca valores):
+  ```bash
+  awk '/^[A-Z0-9_]+=/{v=substr($0,index($0,"=")+1); printf "%s len=%d crlf=%s\n", substr($0,1,index($0,"=")-1), length(v), (v ~ /\r$/ ? "SIM" : "não")}' .env
+  ```
+- Provider "free" que exige cartão de crédito fica **fora** (decisão de 2026-11-02, ADR 0004). Ver a última seção.
+
+## Base (já configurados)
+
+Gemini (AI Studio), Mistral (La Plateforme), Groq, OpenRouter (US$10 lifetime → 1000 RPD nos `:free`), DeepSeek (pago, centavos — sempre último degrau).
 
 ---
 
-## 1. Codestral — endpoint dedicado (2 min)
-Mesma conta Mistral, **chave e quota separadas** da La Plateforme. Endpoint `https://codestral.mistral.ai/v1`.
+## 1. Codestral
 
-1. `console.mistral.ai` → já logado.
-2. Menu lateral → **"Codestral"** (se não aparecer: "API Keys" → aba/seção "Codestral").
-3. **"Request access"** / **"Generate key"** — pode pedir verificação de telefone (você já fez pra La Plateforme).
-4. Copia a chave → `.env`: `CODESTRAL_API_KEY=`
-5. A chave da La Plateforme **não funciona** nesse endpoint, e vice-versa.
+O gateway usa o **codestral pela La Plateforme**, com a mesma `MISTRAL_API_KEY` (`https://api.mistral.ai/v1`, modelo `codestral-latest`). Medido no smoke: **125 RPM / 625k TPM por modelo**, TTFT ~0,5 s, tool calling OK — é a espinha dorsal do `kax/coder-smart`. **Não precisa de chave extra.**
 
-Limites ~30–60 RPM. Modelo: `codestral-latest`. Suporta FIM (`/v1/fim/completions`).
+O endpoint dedicado `https://codestral.mistral.ai/v1` (chave `CODESTRAL_API_KEY`, quota separada, suporta FIM) **não é usado hoje**. Fica registrado como possível degrau extra de capacidade no futuro.
 
 ## 2. NVIDIA API Catalog / NIM (5 min)
-Endpoint `https://integrate.api.nvidia.com/v1`, ~40 RPM, sem cap diário publicado. ToS: dev/test, **não mandar dado confidencial**.
+Endpoint `https://integrate.api.nvidia.com/v1`, ~40 RPM, limite varia por modelo e tráfego. ToS: dev/test, **não mandar dado confidencial**.
 
 1. `build.nvidia.com` → **"Login"** → cria conta NVIDIA Developer (e-mail, sem cartão). Confirma e-mail.
-2. Logado, clica no avatar (canto superior direito) → **"API Keys"** → **"Generate API Key"**.
-   Alternativa: abre qualquer modelo (ex.: `deepseek-ai/deepseek-v4-flash`) → **"Get API Key"** / "Build with this NIM" → gera.
+2. Avatar (canto superior direito) → **"API Keys"** → **"Generate API Key"**.
 3. Copia (começa com `nvapi-`) → `.env`: `NVIDIA_API_KEY=`
-4. IDs de modelo são `org/modelo` como aparecem no catálogo (ex.: `qwen/qwen3-coder-480b-a35b-instruct`, `nvidia/llama-3.3-nemotron-super-49b-v1.5`). O `doctor` lista os visíveis.
+4. IDs de modelo são `org/modelo` como aparecem no catálogo. Nem todo modelo listado em `/models` responde (ex.: `kimi-k2.6` deu 404) — o gateway desliga só o modelo.
 
-Lento em horário de pico (infra compartilhada). Não pedir aumento de limite no fórum — não existe pra free.
+Lento em horário de pico (fila compartilhada): o `providers.toml` usa `first_token_timeout_ms = 20000` nesses modelos. Não existe aumento de limite no free.
 
-## 3. Vercel AI Gateway (5 min + cartão)
-Endpoint `https://ai-gateway.vercel.sh/v1`. US$5 de crédito a cada 30 dias enquanto você **nunca comprar crédito**.
-
-1. `vercel.com` → **"Sign Up"** com GitHub (plano Hobby serve).
-2. Dashboard → aba/menu **"AI Gateway"** → **"API Keys"** → **"Create Key"** → copia → `.env`: `VERCEL_AI_GATEWAY_KEY=`
-3. Pra liberar os US$5: a tela vai pedir **cartão internacional válido** só pra verificar identidade (Settings → Billing → Payment Method). **Não** compra crédito, **não** ativa auto top-up — qualquer compra encerra o free permanente.
-4. O ciclo de 30 dias começa na primeira request.
-5. IDs no formato `provider/modelo` (ex.: `deepseek/deepseek-v3.2`, `zai/glm-4.7`, `moonshotai/kimi-k2`). O free tier cobre **um subconjunto** do catálogo — modelo fora dele devolve `403 RestrictedModelsError`; o scheduler trata como provider pulado pra aquele modelo.
-
-Alternativa por CLI (no WSL): `npx vercel login && npx vercel ai-gateway api-keys create --name openkax`.
-
-## 4. Z.ai (Zhipu) — GLM-4.7-Flash (3 min)
+## 3. Z.ai (Zhipu) — GLM Flash (3 min)
 Endpoint `https://api.z.ai/api/paas/v4` (plataforma internacional; **não** é `bigmodel.cn`).
 
 1. `z.ai/model-api` → **"Get API Key"** / **"Sign up"** (e-mail ou Google).
-2. Console → **"API Keys"** → **"Create new API key"** → copia → `.env`: `ZAI_API_KEY=`
-3. Ignora "Coding Plan" (assinatura paga, outra coisa).
-4. Modelo free: `glm-4.7-flash` (e `glm-4.5-flash` enquanto existir). 200K ctx, concorrência 1, **contexto > 8K é estrangulado** — só pacotes pequenos.
+2. Console → **"API Keys"** → **"Create new API key"** → `.env`: `ZAI_API_KEY=`
+3. Ignore o "Coding Plan" (assinatura paga, outro produto).
+4. Modelos free: `glm-4.7-flash`, `glm-4.5-flash`. Concorrência 1. Thinking desligado via `thinking={type:"disabled"}` (quirk no TOML).
 
-## 5. Cloudflare Workers AI (5 min, conta que você já tem)
-Endpoint `https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/ai/v1`. 10k Neurons/dia.
+## 4. Cloudflare Workers AI (5 min)
+Endpoint `https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/v1`. 10k neurons/dia (neuron ≠ token; o gateway faz pacing por `rpd`).
 
-1. `dash.cloudflare.com` → **Account ID**: aparece na barra lateral direita de qualquer domínio, ou em **"Workers & Pages"** → Overview → "Account details". Copia → `.env`: `CLOUDFLARE_ACCOUNT_ID=`
-2. Avatar → **"My Profile"** → **"API Tokens"** (`dash.cloudflare.com/profile/api-tokens`) → **"Create Token"** → **"Create Custom Token"**.
-3. Permissions: **Account → Workers AI → Read**. Account Resources: Include → sua conta. (Se inferência der 401/403, recria com **Edit**.)
+1. `dash.cloudflare.com` → **Account ID**: aparece na URL (`dash.cloudflare.com/<32 hex>/...`) ou em **"Workers & Pages"** → barra lateral. → `.env`: `CLOUDFLARE_ACCOUNT_ID=`
+2. Avatar → **"My Profile"** → **"API Tokens"** → **"Create Token"** → **"Create Custom Token"**.
+3. Permissions: **Account → Workers AI → Read**. Account Resources: Include → sua conta.
 4. **"Continue to summary"** → **"Create Token"** → copia (só aparece uma vez) → `.env`: `CLOUDFLARE_API_TOKEN=`
-5. IDs `@cf/...` (ex.: `@cf/qwen/qwen2.5-coder-32b-instruct`, `@cf/zai-org/glm-4.7-flash`, `@cf/openai/gpt-oss-120b`). Listagem é em `/ai/models/search`, não em `/v1/models` — o `doctor` já usa a certa.
+5. **Atenção aos nomes:** são duas variáveis distintas. Token salvo com o nome do account id foi exatamente o erro de 2026-11-02.
+6. IDs `@cf/...` vêm do catálogo vivo em `/ai/models/search` (não em `/v1/models`), ignorando modelos com deprecation — o `doctor` já faz isso. Modelo descontinuado responde **410** e o gateway desliga só o modelo.
 
-## 6. Cohere — trial (3 min)
-Endpoint OpenAI-compat `https://api.cohere.ai/compatibility/v1`. 1.000 chamadas/mês, 20 RPM, não comercial.
+## 5. Cohere — trial (3 min)
+Endpoint OpenAI-compat `https://api.cohere.ai/compatibility/v1`. 1.000 chamadas/mês, 20 RPM, **não comercial**.
 
-1. `dashboard.cohere.com` → **"Sign up"** (Google/GitHub/e-mail).
-2. Menu lateral → **"API Keys"**. Uma **Trial key** já vem criada; copia ela ou **"+ New Trial key"**.
-3. `.env`: `COHERE_API_KEY=`
-4. Modelos: `command-a-03-2025` (geral), `command-a-reasoning-08-2025`. Uso no OpenKax: `kax/reviewer` (família diferente dos autores).
+1. `dashboard.cohere.com` → **"Sign up"**.
+2. Menu lateral → **"API Keys"** → copia a Trial key (ou **"+ New Trial key"**) → `.env`: `COHERE_API_KEY=`
+3. Modelo usado: `command-a-03-2025` no `kax/reviewer`. **Não** use `command-a-plus` (vaza raciocínio no content). O TOML liga a quirk `ascii_json` (prompt em português com UTF-8 cru gerava saída degenerada).
 
-## 7. SambaNova Cloud (3 min)
-Endpoint `https://api.sambanova.ai/v1`. 20 RPM, **20 RPD por modelo**, 200k TPD.
+## 6. SambaNova Cloud (3 min)
+Endpoint `https://api.sambanova.ai/v1`. Por modelo: 20 RPM, **20 RPD**, 200k TPD.
 
-1. `cloud.sambanova.ai` → **"Sign up"** (Google/GitHub/e-mail).
-2. Menu lateral → **"API Keys"** → **"Generate New API Key"** → copia → `.env`: `SAMBANOVA_API_KEY=`
-3. **Não** adiciona método de pagamento — isso te move pro Developer tier (US$5 que expiram em 3 meses, depois cobra).
-4. Modelos: `Meta-Llama-3.3-70B-Instruct`, `DeepSeek-V3.2`, `gpt-oss-120b`, `gemma-4-31B-it` — cada um com seus 20/dia.
-
-## 8. Alibaba Model Studio — Qwen (10 min, 90 dias)
-Endpoint `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` (**Singapura**; Beijing e Virginia cobram desde o primeiro token).
-
-1. `alibabacloud.com` → **"Free Account"** / "Sign up" → conta internacional por e-mail. Pode pedir **cartão pra verificação** com hold < US$1 — se pedir e você não quiser, pula este provider.
-2. `modelstudio.console.alibabacloud.com` → seletor de região no topo → **"Singapore"**.
-3. Lê e aceita o ToS → ativação automática + quota free concedida (**o relógio de 90 dias começa agora**).
-4. Menu → **"API Key"** → **"Create API Key"** (geral, pay-as-you-go — não a de "Coding Plan"). Copia → `.env`: `DASHSCOPE_API_KEY=`
-5. **Obrigatório:** pra cada modelo que for usar (`qwen3-coder-plus`, `qwen3.x-coder-flash`…), abre a **página de detalhes do modelo** (região Singapura) → liga **"Free Quota Only"**. Sem isso, quota acabou = cobrança.
-6. Se o console mostrar "Not enabled / Enabling not supported" no switch, é estado de proteção, não erro.
+1. `cloud.sambanova.ai` → **"Sign up"**.
+2. Menu lateral → **"API Keys"** → **"Generate New API Key"** → `.env`: `SAMBANOVA_API_KEY=`
+3. **Não** adicione método de pagamento (move para o Developer tier, que cobra).
+4. Em horário de pico responde 429 "high demand" (capacidade deles, não quota sua) — o gateway trata como cooldown do modelo.
 
 ---
 
 ## Depois de tudo
 ```bash
-cd ~/openkax && ./doctor.sh
+cd ~/openkax && ./doctor.sh        # Windows: .\doctor.ps1
 ```
-Cada provider novo deve sair `[OK]`. `403` com "network/region" = bloqueio da rede do notebook (como o Groq), não da chave — testa do PC de casa.
+Cada provider deve sair `[OK]`. `403` com "check your network settings" ou resposta 2xx que não é JSON = bloqueio de rede/VPN (o ProtonVPN do notebook bloqueia o Groq), não a chave.
+
+## Fora — exigem cartão ou não existem mais (ADR 0004)
+
+- **GitHub Models**: aposentado em 30/07/2026 (playground, catálogo, inference API e BYOK desligados para todos). Removido do gateway. Revogue o PAT que era usado nele.
+- **Vercel AI Gateway**: responde 403 "AI Gateway requires a valid credit card on file" mesmo para modelos de preço 0. Fica no `providers.toml` com `enabled = false`, fora das rotas. Não cadastrar cartão.
+- **Alibaba Model Studio (Qwen/DashScope)**: pode exigir cartão na verificação e a quota free expira em 90 dias. Não adotado.
+- **Cerebras**: virou trial com cartão. Fora.
 
 ## Rotação
-Todas as chaves que passaram por chat devem ser rotacionadas ao fechar a Fase 0. As criadas por este tutorial foram direto pro `.env` e não precisam.
+Toda chave que passou por chat (inclusive colada em texto puro) deve ser rotacionada ao fechar a Fase 0.

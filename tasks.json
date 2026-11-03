@@ -1,0 +1,151 @@
+{
+  "phase": 0,
+  "updated": "2026-11-02",
+  "tasks": [
+    {
+      "id": "F0-01",
+      "title": "Esqueleto do crate, Cargo.toml e perfil release",
+      "owner": "lead",
+      "status": "done"
+    },
+    {
+      "id": "F0-02",
+      "title": "Módulos com tipos públicos (CONTRACT) + trait Platform (Unix)",
+      "owner": "lead",
+      "status": "done"
+    },
+    {
+      "id": "F0-03",
+      "title": "providers.toml (§3.2 + classes §1.1) e parser com round-trip",
+      "owner": "lead",
+      "status": "done"
+    },
+    {
+      "id": "F0-04",
+      "title": "Testes de fallback wiremock (falhando no CONTRACT)",
+      "owner": "lead",
+      "status": "done"
+    },
+    {
+      "id": "F0-05",
+      "title": "Plano do scheduler",
+      "owner": "lead",
+      "status": "done"
+    },
+    {
+      "id": "F0-06",
+      "title": "Scheduler: Clock, buckets, reserva/reconciliação, estados, pick",
+      "owner": "lead",
+      "status": "done"
+    },
+    {
+      "id": "F0-07",
+      "title": "Provider: classificação de erro, is_first_token, start_stream SSE",
+      "owner": "lead",
+      "status": "done"
+    },
+    {
+      "id": "F0-08",
+      "title": "Dispatcher /v1/chat/completions (stream e não-stream) + 429 Retry-After",
+      "owner": "lead",
+      "status": "done"
+    },
+    {
+      "id": "F0-09",
+      "title": "Ledger writer (mpsc + task, rotação diária)",
+      "owner": "lead",
+      "status": "done"
+    },
+    {
+      "id": "F0-10",
+      "title": "/v1/models e /quota; hot-reload do providers.toml (notify); snapshot JSON dos buckets (inclusive mensais) restaurado no start (ADR 0005)",
+      "owner": "lead",
+      "status": "done"
+    },
+    {
+      "id": "F0-11",
+      "title": "WindowsPlatform + workflow CI windows-latest (artefato .exe, tamanho)",
+      "owner": "lead",
+      "status": "done",
+      "note": "WindowsPlatform (item 0) + .github/workflows/ci.yml. CI run 41493536379 verde: .exe 3.078.656 B (2,94 MiB), Linux 3,59 MiB. Local: .exe 3.086.336 B; working set ocioso 8,29 MiB logo após o start, 15,22 MiB ocioso depois de 5 requests (private 4,43 MiB)"
+    },
+    {
+      "id": "F0-12",
+      "title": "Aceite manual: Continue/Cline em kax/coder-fast e kax/coder-smart; memória privada ociosa",
+      "owner": "user",
+      "status": "todo",
+      "note": "Critério de memória agora é memória privada < 10 MB ociosa após uso (F0-23): 3,82 MiB no Windows, 5 min depois de 5 requests. Medir também no Linux/WSL no aceite. PR fase-0 → main aberto; merge só depois deste aceite"
+    },
+    {
+      "id": "F0-13",
+      "title": "Verificar IDs de modelo de Groq e GitHub Models de outra rede (403/proxy no notebook) e habilitar",
+      "owner": "user",
+      "status": "done",
+      "note": "2026-11-02, PC de casa: Groq habilitado (qwen/qwen3.8-27b); GitHub Models aposentado em 2026-07-30 → segue desligado (F0-21)"
+    },
+    {
+      "id": "F0-14",
+      "title": "Smoke real pelo gateway (docs/smoke/2026-11-02-f0-14.md)",
+      "owner": "lead",
+      "status": "done"
+    },
+    {
+      "id": "F0-15",
+      "title": "Providers de cauda (nvidia, vercel, zai, cloudflare, cohere, sambanova) + N1–N6 + pin (pedido como 'F0-12'; ADR 0004)",
+      "owner": "lead",
+      "status": "done"
+    },
+    {
+      "id": "F0-16",
+      "title": "Preencher VERCEL_AI_GATEWAY_KEY e CLOUDFLARE_API_TOKEN no .env; habilitar cloudflare com IDs conferidos",
+      "owner": "user",
+      "status": "done",
+      "note": "chaves presentes; Cloudflare habilitada; Vercel exige cartão (403) → ver F0-22"
+    },
+    {
+      "id": "F0-17",
+      "title": "Cooldown por tipo de erro: provider (auth, rede) × modelo (5xx, protocolo, timeouts, 4xx, pós-1º-token); 429 inalterado (ADR 0003)",
+      "owner": "lead",
+      "status": "done"
+    },
+    {
+      "id": "F0-18",
+      "title": "Timeout de 1º token por modelo (models[].first_token_timeout_ms): NVIDIA e gemini-flash = 20 s",
+      "owner": "lead",
+      "status": "done",
+      "note": "reasoning_effort NÃO aplicado: gemini-flash-latest = gemini-3.8-flash, fora da tabela da doc OpenAI-compat (só 4 Argon, 3.1 Flash-Lite, 3 Flash, 2.5)"
+    },
+    {
+      "id": "F0-19",
+      "title": "Cohere: command-a-plus → command-a-03-2025 (sem raciocínio) + quirk ascii_json (UTF-8 cru degenerava); segue no kax/reviewer",
+      "owner": "lead",
+      "status": "done"
+    },
+    {
+      "id": "F0-20",
+      "title": "Rotas revisadas (codestral à frente do coder-smart e 2º no coder-fast); chars_per_token por modelo; x-openkax-max-tier no ADR 0004",
+      "owner": "lead",
+      "status": "done"
+    },
+    {
+      "id": "F0-21",
+      "title": "Groq/Cloudflare habilitados com IDs dos catálogos; 410 → model_gone; headers IETF RateLimit no escopo do provider; doctor rejeita 2xx não-JSON; smoke docs/smoke/2026-11-02-f0-21.md",
+      "owner": "lead",
+      "status": "done"
+    },
+    {
+      "id": "F0-22",
+      "title": "Decidir: cadastrar cartão no Vercel AI Gateway (403 'requires a valid credit card on file' até em modelo grátis) ou tirar a Vercel das rotas; e remover o GitHub (aposentado) do providers.toml/rota",
+      "owner": "user",
+      "status": "done",
+      "note": "Decidido pelo usuário: GitHub Models removido (TOML, rota, .env.example, doctors, PLANO §1.2); Vercel sem cartão → enabled = false e fora de todas as rotas. ADR 0004"
+    },
+    {
+      "id": "F0-23",
+      "title": "Critério de memória privada < 10 MB ociosa após uso (working set informativo) + higiene de pool do reqwest e blocking do tokio, medida antes/depois",
+      "owner": "lead",
+      "status": "done",
+      "note": "ADR 0002. Privada/WS em MiB, antes → depois: start 1,77/7,99 → 1,77/8,01; pós-5-req 4,07/14,80 → 4,07/14,78; +5 min 3,86/14,82 → 3,82/14,74. Diferença no ruído para requests sequenciais; .exe 3.086.848 B"
+    }
+  ]
+}

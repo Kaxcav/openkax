@@ -18,6 +18,12 @@ Get-Content $envFile | ForEach-Object {
 function Check([string]$name, [string]$url, [hashtable]$headers) {
   try {
     $r = Invoke-WebRequest -Uri $url -Headers $headers -Method GET -TimeoutSec 25 -UseBasicParsing
+    # 2xx que não é JSON (ex.: placeholder "OK" text/plain de serviço aposentado) não vale.
+    $ct = "$($r.Headers['Content-Type'])"
+    if ($ct -notmatch 'json') {
+      Write-Host ("[FAIL] {0,-11} HTTP {1} mas {2} (nao e JSON)" -f $name, $r.StatusCode, $ct) -ForegroundColor Red
+      return $null
+    }
     Write-Host ("[OK]   {0,-11} HTTP {1}" -f $name, $r.StatusCode) -ForegroundColor Green
     return $r.Content
   } catch {
@@ -52,11 +58,6 @@ if ($env:GROQ_API_KEY) {
   $c = Check 'groq' 'https://api.groq.com/openai/v1/models' @{ Authorization = "Bearer $env:GROQ_API_KEY" }
   if ($c) { Write-Host "       modelos visiveis: $(CountModels $c)" }
 } else { Write-Host "[SKIP] groq        sem GROQ_API_KEY" -ForegroundColor DarkGray }
-
-if ($env:GITHUB_MODELS_TOKEN) {
-  $c = Check 'github' 'https://models.github.ai/catalog/models' @{ Authorization = "Bearer $env:GITHUB_MODELS_TOKEN"; Accept = 'application/vnd.github+json' }
-  if ($c) { try { Write-Host "       modelos no catalogo: $(($c | ConvertFrom-Json).Count)" } catch {} }
-} else { Write-Host "[SKIP] github      sem GITHUB_MODELS_TOKEN" -ForegroundColor DarkGray }
 
 if ($env:OPENROUTER_API_KEY) {
   $c = Check 'openrouter' 'https://openrouter.ai/api/v1/key' @{ Authorization = "Bearer $env:OPENROUTER_API_KEY" }
