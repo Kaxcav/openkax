@@ -1,0 +1,14 @@
+# verify do kax-workers para o PRÓPRIO repo openkax (dogfooding, ADR 0007/0008).
+# Os comandos executados vêm de `accept.verify` de cada pacote; os `commands`
+# abaixo são a referência que o lead usa ao montar o pacote. Nenhum comando de
+# verify pode usar git (não funciona dentro da caixa, ADR 0008).
+
+timeout_s = 900
+max_log_bytes = 8192
+sandbox = "bwrap"
+
+[[language]]
+name = "rust"
+globs = ["**/*.rs", "Cargo.toml", "Cargo.lock"]
+commands = ["cargo fmt --all -- --check", "cargo clippy --all-targets -- -D warnings", "cargo test"]
+prefetch = ["cargo fetch --locked"]

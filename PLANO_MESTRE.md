@@ -1,5 +1,7 @@
 # OpenKax — Plano Mestre
 
+> **Revisão 2026-11-03:** os limites de binário < 8 MB e memória privada < 10 MB deixaram de ser critério de aceite (decisão do Kaxcav; ADR 0002, seção "Revisão 2026-11-03"). Leveza segue como preferência.
+
 > Gateway local em Rust + sistema de orquestração onde Claude (Max 20x) é o líder técnico e um pool de modelos free/baratos são os operários. Este documento é a fonte de verdade para o Claude Code conduzir o projeto.
 
 ---
@@ -33,7 +35,7 @@
 └───────┬───────────────────────────────┬─────────────────────────┘
         │ ANTHROPIC_BASE_URL            │ MCP stdio: kax-workers
         ▼                               ▼
-┌──────────────────────── OpenKax (binário único, ~5–10 MB) ──────┐
+┌─────────────────────────── OpenKax (binário único, leve) ───────┐
 │  HTTP :8000                                                      │
 │   /v1/messages            ← Claude Code (Anthropic Messages)     │
 │   /v1/messages/count_tokens                                      │
@@ -136,7 +138,7 @@ Relatório semanal gerado por `openkax report` a partir do ledger.
 
 - `tokio` (rt-multi-thread, 2 workers), `axum`, `reqwest` (rustls, sem openssl), `serde`/`serde_json`, `toml`, `tracing` + `tracing-appender`, `bytes`, `futures`, `rmcp` (MCP stdio), `notify` (hot-reload do TOML).
 - Sem SQLite na v1: ledger em JSONL (`%LOCALAPPDATA%\OpenKax\ledger\YYYY-MM-DD.jsonl`), estado dos buckets em snapshot JSON a cada 5s e no shutdown.
-- `Cargo.toml` release: `lto = "fat"`, `codegen-units = 1`, `opt-level = "z"`, `panic = "abort"`, `strip = true`. Alvo: binário < 8 MB e **memória privada** (Private Bytes / commit) < 10 MB **ociosa após uso**. O working set é só informativo: inclui páginas de DLLs compartilhadas do sistema, que o processo não controla (ADR 0002).
+- `Cargo.toml` release: `lto = "fat"`, `codegen-units = 1`, `opt-level = "z"`, `panic = "abort"`, `strip = true`. Leveza é preferência, não critério de aceite (revisão 2026-11-03): referência histórica da Fase 0 — binário Windows 2,94 MiB e memória privada ociosa 3,82 MiB. Medir é informativo (ADR 0002).
 - Windows: `--no-console` (subsystem windows), `openkax tray` opcional na Fase 5, autostart via Task Scheduler.
 
 ### 3.2 `providers.toml` (provider = dado, não código)
@@ -318,7 +320,7 @@ Outras tools: `status(batch_id)`, `quota()` (saldo por provider), `report(period
 ### Fase 0 — Core do gateway (2–3 dias)
 - `axum` + `providers.toml` + hot-reload; `/v1/chat/completions` com classes; scheduler com buckets; fallback pré-1º-token; ledger; `/quota`, `/health`, `/v1/models`.
 - Testes com providers mockados (`wiremock`): 429 → próximo; timeout de 1º token → próximo; erro pós-1º-token → encerra limpo; TPM insuficiente → provider pulado sem request.
-- **Aceite:** suíte `tests/client_compat.rs` (F0-24) verde no CI em Linux e Windows, reproduzindo os formatos de request do Continue e do Cline em `kax/coder-fast` e `kax/coder-smart` com streaming; binário < 8 MB; memória privada < 10 MB ociosa após uso (§3.1). Parte dos formatos veio de PRs, issues e docs dos clientes, e parte de memória do código (cabeçalho do teste); rodar os clientes reais é conferência opcional, com roteiro em `docs/smoke/fase-0-clientes.md` (ADR 0004).
+- **Aceite:** suíte `tests/client_compat.rs` (F0-24) verde no CI em Linux e Windows, reproduzindo os formatos de request do Continue e do Cline em `kax/coder-fast` e `kax/coder-smart` com streaming. Tamanho do binário e memória privada são medidos e registrados, sem limite rígido (§3.1, revisão 2026-11-03). Parte dos formatos veio de PRs, issues e docs dos clientes, e parte de memória do código (cabeçalho do teste); rodar os clientes reais é conferência opcional, com roteiro em `docs/smoke/fase-0-clientes.md` (ADR 0004).
 
 ### Fase 1 — Ponte Anthropic (2–3 dias)
 - `/v1/messages` + `count_tokens`; translator completo (3.5); passthrough `claude-*`.
