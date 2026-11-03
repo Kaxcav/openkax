@@ -3,7 +3,7 @@
 Você é o **lead técnico** deste repositório. A fonte de verdade é `PLANO_MESTRE.md` — leia inteiro antes de qualquer ação na primeira sessão e releia a seção da fase atual ao retomar.
 
 ## O que é este projeto
-Gateway/proxy local de IA em Rust (binário único Windows, < 8 MB, memória privada < 10 MB ociosa após uso; working set só informativo) que:
+Gateway/proxy local de IA em Rust (binário único, leve por preferência; sem limite rígido de tamanho ou memória desde 2026-11-03, ver ADR 0002) que:
 1. Expõe `/v1/chat/completions` e `/v1/messages` (Anthropic) em `localhost:8000`.
 2. Roteia **classes** (`kax/coder-fast`, `kax/coder-smart`, `kax/summarizer`, `kax/reviewer`, `kax/cheap-long`) para um pool de providers free/baratos com scheduler de quota (RPM/TPM/RPD/TPD) e fallback pré-primeiro-token.
 3. Faz passthrough byte-a-byte de `claude-*` para a Anthropic.
@@ -12,13 +12,10 @@ Gateway/proxy local de IA em Rust (binário único Windows, < 8 MB, memória pri
 Modo B (MCP com pacote enxuto) é o principal. Modo A (rewrite de modelo via `ANTHROPIC_DEFAULT_HAIKU_MODEL`) é bônus.
 
 ## Fase atual
-**Fase 1 — Ponte Anthropic** (branch `fase-1`; a Fase 0 já está na `main`). Critério de saída no `PLANO_MESTRE.md` §4 e tarefas F1-* em `docs/noturno/RUNBOOK.md`.
-Progresso (2026-11-02): Tarefas F1-1 a F1-7 concluídas; F1-8 (documentação, ADR 0006 aceito e roteiro de aceite manual) em revisão.
-- F1-1..F1-4: Tipos e tradução Anthropic ↔ OpenAI, endpoint `POST /v1/messages` para classes `kax/*` (stream/não-stream), fallback pré-1º-token, assinaturas Gemini (`thought_signatures`) e quirks (`alnum9`).
-- F1-5: `POST /v1/messages/count_tokens` para `kax/*` usando `chars_per_token` do 1º degrau, sem reservar cota nem checar limite de pacote.
-- F1-6: Passthrough byte a byte de `claude-*` para upstream nativo Anthropic (`/v1/messages` e `/v1/messages/count_tokens`) com client dedicado sem timeout total (`connect_timeout = 10s`, `read_timeout = 300s`), filtro de hop-by-hop e preservação de múltiplos headers.
-- F1-7: Seção opcional `[aliases]` no TOML (Modo A) preservando ordem de declaração (primeiro match com glob `*` vence), validado no load/reload.
-- Testes atuais: 185 unitários + 79 de integração (total 264 testes verdes, 0 ignored, clippy e fmt limpos). Ver `tasks.json`.
+**Fase 3 — processo e piloto (em preparação)** + **P6 `kax-context` em andamento** (ADR 0009, PRs `feat/context-*`).
+- Na `main`: Fase 0 (gateway), Fase 1 (ponte Anthropic, ADR 0006), Fase 2 (MCP `kax-workers`, ADR 0007), `doctor`/`report`, sandbox do verify (ADR 0008), rota do `kax/summarizer` com codestral como 2º degrau.
+- Fase 3: processo (`.kax/verify.toml`, `CONVENTIONS.md`, `docs/processo/pacote.md`, hooks, métricas) e piloto de 10–14 tarefas reais com go/no-go do `PLANO_MESTRE.md` §4 (aceitação `coder-smart` ≥ 60%, retrabalho < 0.7). O piloto mede pacote fatiado pelo `kax-context` × arquivo inteiro.
+- Ver `tasks.json`.
 
 ## Como usar
 
@@ -27,10 +24,14 @@ Gateway em `localhost:8000`:
 $env:ANTHROPIC_BASE_URL="http://localhost:8000"
 ```
 
-Modo A opcional (subagente Explore / haiku roteado para classe local):
+Modo A opcional (subagente Explore / haiku roteado para classe local). O Explore só passa pelo gateway com as quatro variáveis:
 ```powershell
+$env:ANTHROPIC_BASE_URL="http://localhost:8000"
 $env:ANTHROPIC_DEFAULT_HAIKU_MODEL="kax/summarizer"
+$env:CLAUDE_CODE_SUBAGENT_MODEL="kax/summarizer"
+$env:CLAUDE_CODE_SUBAGENT_MODEL_FORCE="1"
 ```
+O Claude Code só chama o Explore quando acha a busca grande; para forçar: "use o subagente Explore (thoroughness: medium) para ...". Um Explore faz ~25 chamadas em rajada (15k–50k tokens cada): a cota diária da Gemini free (250 por modelo) acaba em ~10 Explores.
 ou via `[aliases]` no `providers.toml`:
 ```toml
 [aliases]
@@ -51,7 +52,7 @@ ou via `[aliases]` no `providers.toml`:
 ## Ambientes (ver ADR 0001)
 Dois ambientes de dev; descubra em qual está (`uname`/plataforma) antes de propor comandos.
 - **Notebook (WSL2 Ubuntu)**: repo em `~/openkax` (ext4). Comandos **bash em Linux**, nunca PowerShell. Tem WDAC em modo enforce: **nenhum `.exe` não assinado roda no host**; rode o binário Linux dentro do WSL (`127.0.0.1:8000`) — clientes no Windows alcançam via `localhost:8000`.
-- **PC de casa (`kaxcavmaster`, Windows nativo)**: sem WDAC, sem VPN, repo em `D:\dev\openkax`. PowerShell e Git Bash permitidos; `cargo test`/`clippy` rodam no Windows e o `.exe` roda localmente (medir tamanho/memória privada, smoke). Rede sem proxy: é daqui que se confere a Groq.
+- **PC de casa (`kaxcavmaster`, Windows nativo)**: sem WDAC, sem VPN, repo em `D:\DEV\openkax`. PowerShell e Git Bash permitidos; `cargo test`/`clippy` rodam no Windows e o `.exe` roda localmente (smoke, medições informativas). WSL `Ubuntu-24.04` com rust + bubblewrap para o `openkax mcp` (a distro padrão do WSL é `docker-desktop`: sempre `wsl -d Ubuntu-24.04`). Rede sem proxy: é daqui que se confere a Groq.
 - O `.exe` de **release** vem do GitHub Actions (`windows-latest`); o build local é só para medir e testar. Código é cross-platform; integração com SO (tray, autostart, paths) isolada atrás do trait `Platform` (`UnixPlatform` XDG, `WindowsPlatform` `%LOCALAPPDATA%\OpenKax`).
 - Validação de chaves: `./doctor.sh` (Linux) ou `.\doctor.ps1` (Windows sem WDAC).
 

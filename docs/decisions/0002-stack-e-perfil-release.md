@@ -67,3 +67,7 @@ No reqwest 0.13 a feature `rustls` puxa `aws-lc-rs`, que no MSVC exige CMake/NAS
 - Memória numa rajada do MCP (F2-6, PC de casa, Windows 11, `openkax mcp` do perfil release, só números, critério inalterado). Lote de 8 tarefas, `parallelism = 4`, operários em `wiremock` (4 aceitas, 4 recusadas pelo verify), pico de 4 simultâneas. Memória privada: **antes 1,67 MiB**, **durante (pico amostrado) 2,30 MiB**, **depois +12 s 2,18 MiB**. Os `git`/verify rodam em processos filhos e não entram na conta. Medição única, sem repetição.
 - `rmcp` e `notify` já estão no manifesto; o tamanho vai ser remedido quando entrarem em uso (Fase 0 hot-reload, Fase 2 MCP).
 - Trocar de crate TLS ou de runtime exige um ADR novo.
+
+## Revisão 2026-11-03
+
+Por decisão do Kaxcav, os limites de binário < 8 MB e memória privada < 10 MB ociosa após uso **deixam de ser critério de aceite**. O PC de desenvolvimento e uso tem folga de sobra, e o limite passou a custar mais do que protege: funcionalidades como o `kax-context` (ADR 0009, tree-sitter e índice de símbolos) podem morar no mesmo binário. O perfil de release (`lto = "fat"`, `opt-level = "z"`, `strip`, `panic = "abort"`) e a stack continuam como estão; tamanho e memória seguem sendo medidos e registrados, como informação. Referência da Fase 0: `.exe` 2,94 MiB, memória privada ociosa 3,82 MiB.
