@@ -659,7 +659,7 @@ async fn dispatch(
                 } else {
                     Outcome::Exhausted
                 };
-                res.fail(&e);
+                res.fail(&e, None);
                 meta.fallbacks += 1;
                 meta.record(st, Some(cand), None, None, outcome);
                 let mut resp = match &e {
@@ -687,7 +687,7 @@ async fn dispatch(
                     attempts_after_fault += 1;
                 }
                 last_was_fault = matches!(e, UpstreamError::RequestFault { .. });
-                if let Some(d) = res.fail(&e) {
+                if let Some(d) = res.fail(&e, None) {
                     waits.push(d);
                 }
                 if let UpstreamError::RequestFault { status, message } = e {
@@ -1001,7 +1001,7 @@ impl Relay {
         self.finished = true;
         tracing::warn!(provider = %self.cand.provider_id, model = %self.cand.model_id, kind = e.kind(), status = ?e.status(), "stream interrompido após o 1º token");
         if let Some(r) = self.res.take() {
-            r.fail(e);
+            r.fail(e, self.usage);
         }
         self.meta.record(
             &self.st,

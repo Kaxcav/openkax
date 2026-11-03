@@ -790,3 +790,92 @@ fn log_does_not_leak_upstream_error_message_post_first_token() {
         "kind=mid_stream esperado no log: {output}"
     );
 }
+
+fn single_provider_with_tpm_config(url: &str, tpm: u32) -> String {
+    format!(
+        r#"
+        [defaults]
+        request_timeout_ms = 5000
+        first_token_timeout_ms = 1000
+        estimate_chars_per_token = 3.6
+
+        [[provider]]
+        id = "mock"
+        base_url = "{url}"
+        auth = {{ kind = "bearer", env = "MOCK_KEY" }}
+        models = [{{ id = "m1", upstream = "upstream-m1", max_ctx = 128000, limits = {{ rpm = 30, tpm = {tpm} }} }}]
+
+        [[class]]
+        id = "kax/test-usage"
+        max_packet_tokens = 60000
+        route = [{{ provider = "mock", model = "m1" }}]
+        "#
+    )
+}
+
+/// A2: stream com usage que morre no meio grava o usage visto no ledger e no bucket TPM.
+#[tokio::test]
+async fn mid_stream_failure_settles_with_seen_usage() {
+    let mock = MockServer::start().await;
+    let chunk_with_usage = json!({
+        "id": "chatcmpl-usage",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": "upstream-m1",
+        "choices": [{ "index": 0, "delta": { "role": "assistant", "content": "olá" }, "finish_reason": null }],
+        "usage": { "prompt_tokens": 5001, "completion_tokens": 7 },
+    });
+    let body = [
+        format!("data: {chunk_with_usage}\n\n"),
+        "data: {\"error\":{\"message\":\"upstream morreu no meio\"}}\n\n".to_owned(),
+    ]
+    .concat();
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(sse_raw(body))
+        .expect(1)
+        .mount(&mock)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let gw = spawn_with_ledger(
+        &single_provider_with_tpm_config(&mock.uri(), 100000),
+        MOCK_SECRETS,
+        dir.path().to_path_buf(),
+    )
+    .await;
+
+    let r = gw
+        .http
+        .post(format!("{}/v1/chat/completions", gw.base))
+        .json(&json!({
+            "model": "kax/test-usage",
+            "stream": true,
+            "messages": [{ "role": "user", "content": "oi" }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let _ = r.text().await;
+    mock.verify().await;
+
+    // 1. Ledger gravou in=5001, out=7
+    let lines = ledger_lines(dir.path(), 1).await;
+    assert_eq!(lines.len(), 1, "ledger deve ter 1 registro: {lines:?}");
+    assert_eq!(lines[0]["outcome"], "mid_stream_error");
+    assert_eq!(lines[0]["in"], 5001, "in deve ser 5001: {lines:?}");
+    assert_eq!(lines[0]["out"], 7, "out deve ser 7: {lines:?}");
+
+    // 2. TPM do bucket reflete 5008 (não a estimativa)
+    let q = gw.quota().await;
+    let tpm_remaining = q["providers"][0]["models"][0]["tpm_remaining"]
+        .as_i64()
+        .expect("tpm_remaining deve existir");
+    let debited = 100000 - tpm_remaining;
+    assert!(
+        (4900..=5008).contains(&debited),
+        "tpm_remaining ({tpm_remaining}, debitado={debited}) deve refletir o usage real (~5008) e não a estimativa: {q}"
+    );
+}
