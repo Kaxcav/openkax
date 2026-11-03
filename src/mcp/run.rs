@@ -129,6 +129,14 @@ async fn attempt_loop(
         st.log = e.to_string();
         return TaskStatus::NeedsLead;
     }
+    // Prefetch (rede, fora da caixa) sobre o base_ref, antes de qualquer diff do operário.
+    if !opts.prefetch.is_empty() {
+        let (path, o) = (wt.path.clone(), opts.clone());
+        if let Err(e) = blocking(move || verify::run_prefetch(&path, &o)).await {
+            st.log = e;
+            return TaskStatus::NeedsLead;
+        }
+    }
     let scope = {
         let path = wt.path.clone();
         match blocking(move || worktree::head(&path)).await {

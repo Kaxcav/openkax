@@ -272,3 +272,61 @@ async fn default_sandbox_is_refused_before_calling_the_worker() {
     groq.verify().await;
     gemini.verify().await;
 }
+
+const PREFETCH_TOML: &str = "[[language]]\nname = \"t\"\nglobs = [\"*.txt\"]\ncommands = [\"x\"]\n";
+
+/// Prefetch que falha → `needs_lead` sem gastar chamada ao operário.
+#[tokio::test]
+async fn failing_prefetch_needs_lead_without_calling_the_worker() {
+    let (groq, gemini) = (MockServer::start().await, MockServer::start().await);
+    mount(&groq, &diff_to("GOOD"), 0).await;
+    mount(&gemini, &diff_to("GOOD"), 0).await;
+    let repo = temp_repo();
+    common::allow_unsandboxed(
+        repo.path(),
+        &format!("{PREFETCH_TOML}prefetch = [\"exit 4\"]\n"),
+    );
+    let app = app(&groq, &gemini, tempfile::tempdir().unwrap().path());
+
+    let r = run_task(&app, repo.path(), "main", &packet("T-8", 2)).await;
+
+    assert_eq!(r.status, TaskStatus::NeedsLead, "{r:?}");
+    assert_eq!(r.attempts, 0);
+    assert!(r.verify_log.contains("prefetch falhou"), "{}", r.verify_log);
+    groq.verify().await;
+    gemini.verify().await;
+}
+
+/// O prefetch roda no worktree ANTES do diff: o marcador (ignorado pelo git)
+/// já existe quando o diff tenta criá-lo, e o `git apply` recusa.
+#[tokio::test]
+async fn prefetch_runs_before_the_diff_is_applied() {
+    let marker_diff = "```diff\n--- /dev/null\n+++ b/marker.txt\n@@ -0,0 +1 @@\n+do operario\n```";
+    let (groq, gemini) = (MockServer::start().await, MockServer::start().await);
+    mount(&groq, marker_diff, 1).await;
+    mount(&gemini, marker_diff, 1).await;
+    let repo = temp_repo();
+    std::fs::write(repo.path().join(".gitignore"), "marker.txt\n").unwrap();
+    git(repo.path(), &["add", ".gitignore"]);
+    git(repo.path(), &["commit", "-q", "-m", "ignore"]);
+    common::allow_unsandboxed(
+        repo.path(),
+        &format!("{PREFETCH_TOML}prefetch = [\"echo do-prefetch> marker.txt\"]\n"),
+    );
+    let app = app(&groq, &gemini, tempfile::tempdir().unwrap().path());
+    let mut p = packet("T-9", 2);
+    p.files[0].path = "marker.txt".into();
+
+    let r = run_task(&app, repo.path(), "main", &p).await;
+
+    assert_eq!(r.status, TaskStatus::NeedsLead, "{r:?}");
+    assert!(
+        r.verify_log.contains("already exists"),
+        "o diff devia colidir com o marcador do prefetch: {}",
+        r.verify_log
+    );
+    let mk = std::fs::read_to_string(repo.path().join(".kax/wt/T-9/marker.txt")).unwrap();
+    assert!(mk.contains("do-prefetch"), "{mk}");
+    groq.verify().await;
+    gemini.verify().await;
+}

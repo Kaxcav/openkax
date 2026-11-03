@@ -72,6 +72,10 @@ pub struct LanguageRule {
     /// Sobrescreve `timeout_s` para esta linguagem.
     #[serde(default)]
     pub timeout_s: Option<u64>,
+    /// Comandos com rede, fora da caixa, no worktree recém-criado e **antes**
+    /// de aplicar o diff do operário (ex.: `cargo fetch --locked`).
+    #[serde(default)]
+    pub prefetch: Vec<String>,
 }
 
 /// Erro ao ler ou validar `verify.toml`.
@@ -122,6 +126,9 @@ impl VerifyConfig {
             }
             if l.commands.is_empty() || l.commands.iter().any(|c| c.trim().is_empty()) {
                 return bad(format!("language {:?}: commands vazio", l.name));
+            }
+            if l.prefetch.iter().any(|c| c.trim().is_empty()) {
+                return bad(format!("language {:?}: prefetch com comando vazio", l.name));
             }
             if l.timeout_s == Some(0) {
                 return bad(format!("language {:?}: timeout_s deve ser > 0", l.name));
@@ -235,6 +242,8 @@ pub enum RunError {
     Git { args: String, stderr: String },
     #[error("{0}")]
     SandboxUnavailable(String),
+    #[error("prefetch falhou: {command}\n{log}")]
+    PrefetchFailed { command: String, log: String },
     #[error("erro de E/S: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -269,6 +278,8 @@ pub struct RunOptions {
     pub env_passthrough: Vec<String>,
     /// Isolamento dos comandos (padrão: [`Sandbox::Bwrap`], fail closed).
     pub sandbox: Sandbox,
+    /// Comandos de prefetch (rede, sem sandbox, antes do diff); ver [`run_prefetch`].
+    pub prefetch: Vec<String>,
     /// `PATH` usado só para achar o `bwrap`; `None` = `PATH` do processo.
     /// Existe para os testes do fail closed.
     pub search_path: Option<std::ffi::OsString>,
@@ -276,11 +287,18 @@ pub struct RunOptions {
 
 impl RunOptions {
     pub fn from_config(cfg: &VerifyConfig) -> Self {
+        let mut prefetch: Vec<String> = Vec::new();
+        for c in cfg.languages.iter().flat_map(|l| &l.prefetch) {
+            if !prefetch.contains(c) {
+                prefetch.push(c.clone());
+            }
+        }
         Self {
             timeout: Duration::from_secs(cfg.timeout_s),
             max_log_bytes: cfg.max_log_bytes,
             env_passthrough: cfg.env_passthrough.clone(),
             sandbox: cfg.sandbox,
+            prefetch,
             search_path: None,
         }
     }
@@ -293,6 +311,7 @@ impl Default for RunOptions {
             max_log_bytes: DEFAULT_MAX_LOG_BYTES,
             env_passthrough: Vec::new(),
             sandbox: Sandbox::default(),
+            prefetch: Vec::new(),
             search_path: None,
         }
     }
@@ -593,6 +612,29 @@ pub fn run_verify(
         outcomes,
         warnings,
     })
+}
+
+/// Prefetch (`opts.prefetch`): roda com rede, **fora** da caixa, no worktree
+/// recém-criado e antes de aplicar o diff do operário (portanto sobre o
+/// `base_ref`, confiável). Mesmo timeout e ambiente limpo; o primeiro que
+/// falhar encerra com [`RunError::PrefetchFailed`].
+pub fn run_prefetch(worktree: &Path, opts: &RunOptions) -> Result<(), RunError> {
+    ensure_worktree(worktree)?;
+    for cmd in &opts.prefetch {
+        let o = run_command(worktree, cmd, 0, opts, &Mode::Plain)?;
+        if !o.passed {
+            let why = if o.timed_out {
+                "timeout".to_owned()
+            } else {
+                format!("exit {:?}", o.exit_code)
+            };
+            return Err(RunError::PrefetchFailed {
+                command: cmd.clone(),
+                log: format!("{why}\n{}", o.log),
+            });
+        }
+    }
+    Ok(())
 }
 
 static LOG_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -1104,6 +1146,38 @@ mod sandbox_tests {
         let c = VerifyConfig::parse("sandbox = \"none\"").unwrap();
         assert_eq!(c.sandbox, Sandbox::None);
         assert!(VerifyConfig::parse("sandbox = \"docker\"").is_err());
+        let lang = "[[language]]\nname=\"r\"\nglobs=[\"*.rs\"]\ncommands=[\"x\"]\n";
+        let p =
+            VerifyConfig::parse(&format!("{lang}prefetch=[\"cargo fetch --locked\"]\n")).unwrap();
+        assert_eq!(
+            RunOptions::from_config(&p).prefetch,
+            ["cargo fetch --locked"]
+        );
+        assert!(VerifyConfig::parse(&format!("{lang}prefetch=[\" \"]\n")).is_err());
+    }
+
+    #[test]
+    fn prefetch_runs_outside_and_failure_stops() {
+        let (_d, _p, wt) = layout();
+        let ok = RunOptions {
+            prefetch: cmds(&["echo marcador> marker.txt"]),
+            ..opts(Sandbox::Bwrap)
+        };
+        // Roda sem caixa mesmo com sandbox = bwrap (inclusive onde bwrap não existe).
+        run_prefetch(&wt, &ok).unwrap();
+        assert!(wt.join("marker.txt").exists());
+        let bad = RunOptions {
+            prefetch: cmds(&["exit 3", "echo nunca> depois.txt"]),
+            ..ok
+        };
+        match run_prefetch(&wt, &bad) {
+            Err(RunError::PrefetchFailed { command, log }) => {
+                assert_eq!(command, "exit 3");
+                assert!(log.contains("exit Some(3)"), "{log}");
+            }
+            other => panic!("esperava PrefetchFailed, veio {other:?}"),
+        }
+        assert!(!wt.join("depois.txt").exists());
     }
 
     /// Windows e macOS: o padrão não é atendível; recusa sem executar nada.
