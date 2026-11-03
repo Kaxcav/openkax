@@ -1,0 +1,8 @@
+# Fixture do kax-context (ADR 0009): crate próprio, fora do workspace do openkax.
+[package]
+name = "kax_context_fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]

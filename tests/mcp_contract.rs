@@ -180,6 +180,13 @@ fn tools_list_has_the_five_tools_with_required_fields() {
     ] {
         assert!(task["properties"][f].is_object(), "TaskPacket.{f}");
     }
+
+    // Recorte do kax-context (ADR 0009): opcionais, só com mode=read.
+    let file = &batch["$defs"]["FileSpec"];
+    assert_eq!(required(file), ["mode", "path"]);
+    for f in ["path", "mode", "exists", "symbols", "lines"] {
+        assert!(file["properties"][f].is_object(), "FileSpec.{f}");
+    }
 }
 
 #[test]

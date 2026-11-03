@@ -1,0 +1,4 @@
+# Fixtures com bytes estáveis em qualquer checkout (core.autocrlf=true no
+# Windows): spans e goldens dependem deles (ADR 0009).
+tests/fixtures/context/** text eol=lf
+tests/fixtures/mcp/** text eol=lf

@@ -762,6 +762,36 @@ mod tests {
         assert!(!t.contains(&"y".repeat(4001)));
     }
 
+    /// Gerados com o código de antes dos campos `symbols`/`lines` (P6a).
+    const GOLDEN_REQUEST: &str = include_str!("../../tests/fixtures/mcp/pacote_sem_seletores.json");
+    const GOLDEN_PACKET: &str =
+        include_str!("../../tests/fixtures/mcp/task_packet_sem_seletores.json");
+
+    #[test]
+    fn packet_without_selectors_is_unchanged() {
+        let d = repo();
+        let r = build_request(&packet(), d.path(), 6000, 3.6).unwrap();
+        let got = serde_json::to_string_pretty(&r).unwrap() + "\n";
+        assert_eq!(got, GOLDEN_REQUEST.replace("\r\n", "\n"));
+
+        let got = serde_json::to_string_pretty(&packet()).unwrap() + "\n";
+        assert_eq!(got, GOLDEN_PACKET.replace("\r\n", "\n"));
+        let back: TaskPacket = serde_json::from_str(GOLDEN_PACKET).unwrap();
+        assert_eq!(back, packet());
+    }
+
+    #[test]
+    fn selectors_are_refused_not_ignored() {
+        let d = repo();
+        let mut p = packet();
+        p.files[0].symbols = Some(vec!["X".into()]);
+        let e = build_request(&p, d.path(), 6000, 3.6).unwrap_err();
+        assert!(
+            matches!(e, PacketError::Invalid(ref m) if m.contains("P6d")),
+            "{e}"
+        );
+    }
+
     #[test]
     fn missing_read_file_is_a_file_error() {
         let d = repo();

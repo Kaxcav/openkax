@@ -48,6 +48,50 @@ pub struct FileSpec {
     /// `false` quando o arquivo ainda não existe (operário vai criá-lo).
     #[serde(default = "default_true")]
     pub exists: bool,
+    /// Só com `mode = "read"`: em vez do arquivo inteiro, manda estes
+    /// símbolos (`nome`, `Tipo::nome` ou `<arquivo>::<qual_name>`) com os
+    /// tipos que usam, as assinaturas do que chamam e os chamadores (ADR 0009).
+    /// Ainda não atendido: a validação recusa até a P6d.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbols: Option<Vec<String>>,
+    /// Só com `mode = "read"`: `[início, fim]`, 1-based e inclusivo; não
+    /// combina com `symbols`. Ainda não atendido: a validação recusa até a P6d.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<[u32; 2]>,
+}
+
+impl FileSpec {
+    /// Pede recorte (`symbols` ou `lines`) em vez do arquivo inteiro.
+    pub fn selects(&self) -> bool {
+        self.symbols.is_some() || self.lines.is_some()
+    }
+
+    /// Regras de `symbols`/`lines` que valem desde já (ADR 0009, decisão 7).
+    fn validate_selectors(&self) -> Result<(), String> {
+        let path = &self.path;
+        if !self.selects() {
+            return Ok(());
+        }
+        if self.mode != FileMode::Read {
+            return Err(format!("{path}: symbols/lines só valem com mode=read"));
+        }
+        if self.symbols.is_some() && self.lines.is_some() {
+            return Err(format!("{path}: use symbols ou lines, não os dois"));
+        }
+        if let Some(s) = &self.symbols
+            && (s.is_empty() || s.iter().any(|q| q.trim().is_empty()))
+        {
+            return Err(format!("{path}: symbols vazio ou com item vazio"));
+        }
+        if let Some([start, end]) = self.lines
+            && (start == 0 || start > end)
+        {
+            return Err(format!(
+                "{path}: lines deve ser [início, fim] com 1 <= início <= fim"
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Critério de aceite: comandos do `verify` e o resultado esperado.
@@ -256,10 +300,19 @@ impl TaskPacket {
             if f.path.is_empty() || p.has_root() || p.is_absolute() || escapes {
                 return Err(format!("{id}: path fora do repo: {:?}", f.path));
             }
+            f.validate_selectors().map_err(|e| format!("{id}: {e}"))?;
         }
         if !(1..=MAX_ATTEMPTS).contains(&self.max_attempts) {
             return Err(format!(
                 "{id}: max_attempts deve estar em 1..={MAX_ATTEMPTS}"
+            ));
+        }
+        // Recusa explícita em vez de mandar o arquivo inteiro sem avisar: o
+        // pacote só passa a atender o recorte na P6d (ADR 0009).
+        if let Some(f) = self.files.iter().find(|f| f.selects()) {
+            return Err(format!(
+                "{id}: {}: files[].symbols/lines ainda não são atendidos pelo pacote (P6d, ADR 0009)",
+                f.path
             ));
         }
         Ok(())
@@ -365,6 +418,84 @@ mod tests {
         b.tasks.pop();
         b.parallelism = 0;
         assert!(b.validate().is_err());
+    }
+
+    fn with_file(extra: serde_json::Value) -> TaskPacket {
+        let mut v = serde_json::to_value(packet()).unwrap();
+        let file = v["files"][0].as_object_mut().unwrap();
+        for (k, val) in extra.as_object().unwrap() {
+            file.insert(k.clone(), val.clone());
+        }
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn selectors_are_optional_and_absent_on_the_wire() {
+        let t = packet();
+        assert!(t.files.iter().all(|f| !f.selects()));
+        let v = serde_json::to_value(&t).unwrap();
+        for f in v["files"].as_array().unwrap() {
+            let keys: Vec<&str> = f.as_object().unwrap().keys().map(String::as_str).collect();
+            assert_eq!(keys, ["exists", "mode", "path"], "sem symbols/lines");
+        }
+        let back: TaskPacket = serde_json::from_value(v).unwrap();
+        assert_eq!(back, t);
+
+        let schema = schemars::schema_for!(FileSpec);
+        let s = schema.as_value();
+        assert!(s["properties"]["symbols"].is_object());
+        assert!(s["properties"]["lines"].is_object());
+        let mut req: Vec<&str> = s["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r.as_str())
+            .collect();
+        req.sort_unstable();
+        assert_eq!(req, ["mode", "path"]);
+    }
+
+    #[test]
+    fn selectors_only_with_read() {
+        let mut t = with_file(serde_json::json!({ "symbols": ["X"] }));
+        t.files[0].mode = FileMode::Write;
+        assert!(t.validate().unwrap_err().contains("mode=read"));
+        let mut t = with_file(serde_json::json!({ "lines": [1, 3] }));
+        t.files[0].mode = FileMode::Write;
+        assert!(t.validate().unwrap_err().contains("mode=read"));
+    }
+
+    #[test]
+    fn selectors_shape_is_checked() {
+        for (extra, needle) in [
+            (serde_json::json!({ "symbols": [] }), "symbols vazio"),
+            (
+                serde_json::json!({ "symbols": ["Rect::new", " "] }),
+                "symbols vazio",
+            ),
+            (serde_json::json!({ "lines": [0, 3] }), "1 <= início <= fim"),
+            (serde_json::json!({ "lines": [5, 2] }), "1 <= início <= fim"),
+            (
+                serde_json::json!({ "symbols": ["X"], "lines": [1, 2] }),
+                "não os dois",
+            ),
+        ] {
+            let e = with_file(extra.clone()).validate().unwrap_err();
+            assert!(e.contains(needle), "{extra}: {e}");
+        }
+    }
+
+    #[test]
+    fn well_formed_selectors_wait_for_p6d() {
+        for extra in [
+            serde_json::json!({ "symbols": ["PaymentAdapter"] }),
+            serde_json::json!({ "lines": [1, 1] }),
+            serde_json::json!({ "lines": [3, 40] }),
+        ] {
+            let e = with_file(extra.clone()).validate().unwrap_err();
+            assert!(e.contains("P6d"), "{extra}: {e}");
+            assert!(e.contains("src/payments/mod.rs"), "{e}");
+        }
     }
 
     #[test]

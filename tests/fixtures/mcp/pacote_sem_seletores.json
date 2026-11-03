@@ -1,0 +1,15 @@
+{
+  "model": "kax/coder-smart",
+  "messages": [
+    {
+      "role": "system",
+      "content": "Você é um operário de código. Executa UMA tarefa delimitada e devolve só o resultado.\nRegras:\n- Altere apenas os arquivos marcados como ESCRITA; os de LEITURA são contexto.\n- Respeite os contratos (tipos, traits, assinaturas) e as restrições à risca.\n- Todos os caminhos são relativos à raiz do repo, com `/`; nunca use caminho absoluto nem `..`.\n- Não explique, não peça esclarecimentos: se algo for ambíguo, siga o contrato literalmente.\n- Responda exatamente no formato de saída exigido ao final do pedido."
+    },
+    {
+      "role": "user",
+      "content": "# Objetivo\nImplementar o adapter\n\n# Arquivos de LEITURA (contexto)\n\n## src/a.rs\n```\npub trait X {}\n```\n\n## src/b.rs\n```\npub fn b() {}\n```\n\n# Arquivos de ESCRITA\n\n## src/new.rs (novo arquivo)\n\n# Contratos\n- trait X { fn f(&self); }\n\n# Restrições\n- sem novas dependências\n\n# Critério de aceite\n- `cargo check`\nEsperado: exit 0\n\n# Formato de saída exigido\nDevolva UM diff unificado dentro de um bloco ```diff, com cabeçalhos `--- a/<path>` e `+++ b/<path>` (arquivo novo: `--- /dev/null`). Paths relativos ao repo. Nada fora do bloco.\n"
+    }
+  ],
+  "stream": false,
+  "temperature": 0.2
+}
