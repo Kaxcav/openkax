@@ -413,10 +413,28 @@ fn mid_stream_upstream_error_settles_and_cools_down() {
     let mut r = f.reserve(1000);
     r.first_token();
     r.add_output_chars(100);
-    let d = r.fail(&UpstreamError::MidStream("eof".into()));
+    let d = r.fail(&UpstreamError::MidStream("eof".into()), None);
     assert_eq!(d, Some(Duration::from_secs(20)));
     assert_eq!(f.snap_model("p", "m").tpm_remaining, Some(8000 - 1100));
     assert!(approx(cooldown(f.skip(&req(10))), 20.0));
+}
+
+#[test]
+fn fail_after_first_token_with_seen_usage_settles_real_tokens() {
+    let f = fx(&single(
+        "cooldown = { on_5xx_s = 20 }",
+        ", limits = { tpm = 8000 }",
+    ));
+    let mut r = f.reserve(1000);
+    r.first_token();
+    let usage = Usage {
+        prompt_tokens: 5001,
+        completion_tokens: 7,
+        total_tokens: 5008,
+    };
+    let d = r.fail(&UpstreamError::MidStream("eof".into()), Some(usage));
+    assert_eq!(d, Some(Duration::from_secs(20)));
+    assert_eq!(f.snap_model("p", "m").tpm_remaining, Some(8000 - 5008));
 }
 
 // ---------------------------------------------------------------- max_tokens (decisão 2)
@@ -456,10 +474,13 @@ fn without_quirk_reserves_input_only() {
 #[test]
 fn request_fault_skips_without_cooldown_and_counts() {
     let f = fx(&single("", ""));
-    let d = f.reserve(10).fail(&UpstreamError::RequestFault {
-        status: 400,
-        message: String::new(),
-    });
+    let d = f.reserve(10).fail(
+        &UpstreamError::RequestFault {
+            status: 400,
+            message: String::new(),
+        },
+        None,
+    );
     assert_eq!(d, None);
     assert_eq!(f.s.provider_state("p"), Some(ProviderState::Healthy));
     assert_eq!(f.snap_model("p", "m").request_faults, 1);
@@ -469,7 +490,8 @@ fn request_fault_skips_without_cooldown_and_counts() {
 #[test]
 fn auth_error_disables_provider() {
     let f = fx(&single("", ""));
-    f.reserve(10).fail(&UpstreamError::Auth { status: 401 });
+    f.reserve(10)
+        .fail(&UpstreamError::Auth { status: 401 }, None);
     assert_eq!(
         f.s.provider_state("p"),
         Some(ProviderState::Disabled {
@@ -503,7 +525,7 @@ fn not_found_disables_only_the_model() {
     assert_eq!(p.candidates.len(), 2);
     f.s.reserve(&p.candidates[0])
         .unwrap()
-        .fail(&UpstreamError::NotFound { status: 404 });
+        .fail(&UpstreamError::NotFound { status: 404 }, None);
 
     assert_eq!(f.s.provider_state("p"), Some(ProviderState::Healthy));
     assert_eq!(
@@ -537,13 +559,13 @@ fn rate_limit_cools_model_scope_when_model_has_limits() {
         route = [{ provider = "p", model = "a" }, { provider = "p", model = "b" }]
     "#);
     let p = f.pick(&req(10));
-    let d =
-        f.s.reserve(&p.candidates[0])
-            .unwrap()
-            .fail(&UpstreamError::RateLimited {
-                retry_after: Some(Duration::from_secs(30)),
-                daily: false,
-            });
+    let d = f.s.reserve(&p.candidates[0]).unwrap().fail(
+        &UpstreamError::RateLimited {
+            retry_after: Some(Duration::from_secs(30)),
+            daily: false,
+        },
+        None,
+    );
     assert_eq!(d, Some(Duration::from_secs(30)));
     assert_eq!(f.s.provider_state("p"), Some(ProviderState::Healthy));
     assert!(matches!(
@@ -561,10 +583,13 @@ fn rate_limit_cools_model_scope_when_model_has_limits() {
 #[test]
 fn rate_limit_cools_provider_scope_when_model_has_no_limits() {
     let f = fx(&single("limits = { rpm = 10 }", ""));
-    let d = f.reserve(10).fail(&UpstreamError::RateLimited {
-        retry_after: None,
-        daily: false,
-    });
+    let d = f.reserve(10).fail(
+        &UpstreamError::RateLimited {
+            retry_after: None,
+            daily: false,
+        },
+        None,
+    );
     assert_eq!(d, Some(Duration::from_secs(60)), "on_429_s default");
     assert!(matches!(
         f.s.provider_state("p"),
@@ -579,35 +604,47 @@ fn rate_limit_cools_provider_scope_when_model_has_no_limits() {
 #[test]
 fn rate_limit_ceiling_is_next_daily_reset() {
     let f = fx_at(&single("limits = { rpd = 100 }", ""), utc(23, 59, 50));
-    let d = f.reserve(10).fail(&UpstreamError::RateLimited {
-        retry_after: Some(Duration::from_secs(3600)),
-        daily: false,
-    });
+    let d = f.reserve(10).fail(
+        &UpstreamError::RateLimited {
+            retry_after: Some(Duration::from_secs(3600)),
+            daily: false,
+        },
+        None,
+    );
     assert_eq!(d, Some(Duration::from_secs(10)));
 
     let f = fx_at(&single("limits = { rpd = 100 }", ""), utc(22, 0, 0));
-    let d = f.reserve(10).fail(&UpstreamError::RateLimited {
-        retry_after: Some(Duration::from_secs(5)),
-        daily: true,
-    });
+    let d = f.reserve(10).fail(
+        &UpstreamError::RateLimited {
+            retry_after: Some(Duration::from_secs(5)),
+            daily: true,
+        },
+        None,
+    );
     assert_eq!(d, Some(Duration::from_secs(2 * 3600)));
 
     // Retry-After zero/ausente nunca vira cooldown de 0 s.
     let f = fx(&single("", ""));
-    let d = f.reserve(10).fail(&UpstreamError::RateLimited {
-        retry_after: Some(Duration::ZERO),
-        daily: false,
-    });
+    let d = f.reserve(10).fail(
+        &UpstreamError::RateLimited {
+            retry_after: Some(Duration::ZERO),
+            daily: false,
+        },
+        None,
+    );
     assert_eq!(d, Some(Duration::from_secs(1)));
 }
 
 #[test]
 fn rpd_exhausted_rate_limit_waits_for_reset() {
     let f = fx_at(&single("limits = { rpd = 1 }", ""), utc(20, 0, 0));
-    let d = f.reserve(10).fail(&UpstreamError::RateLimited {
-        retry_after: Some(Duration::from_secs(5)),
-        daily: false,
-    });
+    let d = f.reserve(10).fail(
+        &UpstreamError::RateLimited {
+            retry_after: Some(Duration::from_secs(5)),
+            daily: false,
+        },
+        None,
+    );
     // bucket RPD do escopo zerado → cooldown até o reset (4 h)
     assert_eq!(d, Some(Duration::from_secs(4 * 3600)));
 }
@@ -633,7 +670,7 @@ const SIBLINGS: &str = r#"
 fn fail_flash(f: &Fx, err: &UpstreamError) -> Option<Duration> {
     let p = f.pick(&req(10));
     assert_eq!(&*p.candidates[0].model_id, "gemini-flash");
-    f.s.reserve(&p.candidates[0]).unwrap().fail(err)
+    f.s.reserve(&p.candidates[0]).unwrap().fail(err, None)
 }
 
 fn is_cooldown(s: Option<ProviderState>) -> bool {
@@ -744,7 +781,7 @@ fn failure_after_first_token_cools_only_the_model() {
     let p = f.pick(&req(10));
     let mut r = f.s.reserve(&p.candidates[0]).unwrap();
     r.first_token();
-    let d = r.fail(&UpstreamError::Network("reset".into()));
+    let d = r.fail(&UpstreamError::Network("reset".into()), None);
     assert_eq!(d, Some(Duration::from_secs(20)));
     assert_eq!(f.s.provider_state("gemini"), Some(ProviderState::Healthy));
     assert!(is_cooldown(f.s.model_state("gemini", "gemini-flash")));
@@ -809,10 +846,13 @@ fn max_concurrent_blocks_until_reservation_closes() {
     r2.settle(None);
     // fail solta o slot
     let r3 = f.reserve(10);
-    r3.fail(&UpstreamError::RequestFault {
-        status: 400,
-        message: String::new(),
-    });
+    r3.fail(
+        &UpstreamError::RequestFault {
+            status: 400,
+            message: String::new(),
+        },
+        None,
+    );
     // drop pós-1º-token solta o slot
     let mut r4 = f.reserve(10);
     r4.first_token();
@@ -1161,7 +1201,7 @@ fn spend(f: &Fx) {
     let b = p.candidates.iter().find(|c| &*c.model_id == "b").unwrap();
     f.s.reserve(b)
         .unwrap()
-        .fail(&UpstreamError::Server { status: 503 });
+        .fail(&UpstreamError::Server { status: 503 }, None);
 }
 
 /// F0-10: export → restore num scheduler novo devolve buckets (incluindo os
@@ -1247,7 +1287,8 @@ fn snapshot_restore_tolerates_config_changes() {
 #[test]
 fn snapshot_does_not_carry_disabled_state() {
     let f = fx(SNAP_BODY);
-    f.reserve_first().fail(&UpstreamError::Auth { status: 401 });
+    f.reserve_first()
+        .fail(&UpstreamError::Auth { status: 401 }, None);
     let s2 = rebuild(&f, SNAP_BODY);
     s2.restore_state(&f.s.export_state());
     assert_eq!(s2.provider_state("p"), Some(ProviderState::Healthy));

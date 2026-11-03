@@ -1396,11 +1396,11 @@ impl Reservation {
 
     /// Falha vinda do upstream: aplica a transição de estado. Devolve o
     /// cooldown aplicado (entra no `Retry-After`).
-    pub fn fail(mut self, error: &UpstreamError) -> Option<Duration> {
+    pub fn fail(mut self, error: &UpstreamError, seen: Option<Usage>) -> Option<Duration> {
         if self.started {
-            // Tokens foram gastos: cobra o estimado; o modelo falhou no meio
-            // da resposta → on_5xx_s só no escopo do modelo (F0-17).
-            self.close_settle(None);
+            // Tokens foram gastos: cobra o usage visto (se houver) ou a estimativa;
+            // o modelo falhou no meio da resposta → on_5xx_s só no escopo do modelo (F0-17).
+            self.close_settle(seen);
             let p = &self.shared.providers[self.provider_idx];
             let d = Duration::from_secs(p.cooldown.on_5xx_s).max(MIN_COOLDOWN);
             let now = self.shared.clock.now();

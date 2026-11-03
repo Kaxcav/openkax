@@ -120,6 +120,40 @@ pub enum UpstreamError {
     MidStream(String),
 }
 
+impl UpstreamError {
+    /// Categoria do erro para telemetria e log seguro (sem dados do upstream).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::RequestFault { .. } => "request_fault",
+            Self::Auth { .. } => "http_auth",
+            Self::NotFound { .. } => "http_404",
+            Self::Gone => "http_410",
+            Self::RateLimited { .. } => "http_429",
+            Self::Server { .. } => "http_5xx",
+            Self::FirstTokenTimeout => "timeout_first_token",
+            Self::RequestTimeout => "timeout_request",
+            Self::OtherClient { .. } => "http_4xx_other",
+            Self::Network(_) => "network",
+            Self::Protocol(_) => "protocol",
+            Self::MidStream(_) => "mid_stream",
+        }
+    }
+
+    /// Status HTTP associado, quando conhecido.
+    pub fn status(&self) -> Option<u16> {
+        match self {
+            Self::RequestFault { status, .. }
+            | Self::Auth { status }
+            | Self::NotFound { status }
+            | Self::Server { status }
+            | Self::OtherClient { status } => Some(*status),
+            Self::Gone => Some(410),
+            Self::RateLimited { .. } => Some(429),
+            _ => None,
+        }
+    }
+}
+
 /// Stream upstream que **já passou** do 1º token.
 ///
 /// `prelude` guarda os chunks vistos até (e incluindo) o primeiro que conta
