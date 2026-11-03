@@ -88,12 +88,16 @@ pub struct ProviderReport {
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
     pub providers: Vec<ProviderReport>,
+    /// Isolamento do verify do `kax-workers` (ADR 0008).
+    pub sandbox: Check,
 }
 
 impl Report {
-    /// Algum provider habilitado deu FAIL (exit code ≠ 0).
+    /// Algum provider habilitado deu FAIL, ou o bwrap existe mas não cria a
+    /// caixa (exit code ≠ 0).
     pub fn failed(&self) -> bool {
-        self.providers.iter().any(|p| p.status == Status::Fail)
+        self.sandbox.status == Status::Fail
+            || self.providers.iter().any(|p| p.status == Status::Fail)
     }
 
     pub fn to_json(&self) -> String {
@@ -101,7 +105,12 @@ impl Report {
     }
 
     pub fn to_text(&self) -> String {
-        let mut out = String::new();
+        let mut out = format!(
+            "[{}] {} {}\n",
+            self.sandbox.status.tag(),
+            self.sandbox.name,
+            self.sandbox.detail
+        );
         for p in &self.providers {
             let models = p
                 .catalog_models
@@ -158,7 +167,53 @@ pub async fn run(
         }
         providers.push(check_provider(config, secrets, &client, p, opts).await);
     }
-    Ok(Report { providers })
+    Ok(Report {
+        providers,
+        sandbox: check_sandbox(),
+    })
+}
+
+/// Checagem `sandbox`: o verify do `kax-workers` só roda isolado com bwrap
+/// (Linux). Ausente → WARN (o verify recusa, fail closed); presente mas sem
+/// conseguir criar a caixa (userns bloqueado) → FAIL.
+pub fn check_sandbox() -> Check {
+    #[cfg(target_os = "linux")]
+    {
+        use crate::verify::{find_in_path, sandbox_probe};
+        if find_in_path("bwrap", None).is_none() {
+            return Check::new(
+                "sandbox",
+                Status::Warn,
+                "bwrap ausente: o verify do kax-workers vai recusar (instale bubblewrap)",
+            );
+        }
+        match sandbox_probe() {
+            Ok(()) => Check::new("sandbox", Status::Ok, "bwrap cria caixa sem rede"),
+            Err(e) => Check::new(
+                "sandbox",
+                Status::Fail,
+                format!(
+                    "bwrap não criou a caixa ({e}); no Ubuntu 24.04: sysctl kernel.apparmor_restrict_unprivileged_userns=0 ou perfil AppArmor para o bwrap"
+                ),
+            ),
+        }
+    }
+    #[cfg(windows)]
+    {
+        Check::new(
+            "sandbox",
+            Status::Warn,
+            "verify sem sandbox no Windows; use o WSL (docs/sandbox-wsl.md)",
+        )
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        Check::new(
+            "sandbox",
+            Status::Warn,
+            "verify sem sandbox nesta plataforma; rode o kax-workers no Linux/WSL",
+        )
+    }
 }
 
 async fn check_provider(
@@ -446,4 +501,40 @@ async fn check_chat(
     check.ttft_ms = attempt.result.is_ok().then_some(ttft);
     check.headers = attempt.limit_headers;
     check
+}
+
+#[cfg(test)]
+mod sandbox_check_tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_warns_to_use_wsl() {
+        let c = check_sandbox();
+        assert_eq!(c.status, Status::Warn);
+        assert!(c.detail.contains("WSL"), "{}", c.detail);
+    }
+
+    /// No CI Linux o bwrap é instalado e tem de funcionar (sem pular).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_reports_bwrap() {
+        let c = check_sandbox();
+        if std::env::var_os("CI").is_some_and(|v| v == "true") {
+            assert_eq!(c.status, Status::Ok, "{}", c.detail);
+        } else {
+            assert_eq!(c.name, "sandbox");
+        }
+    }
+
+    #[test]
+    fn sandbox_fail_fails_the_report() {
+        let rep = |status| Report {
+            providers: Vec::new(),
+            sandbox: Check::new("sandbox", status, ""),
+        };
+        assert!(rep(Status::Fail).failed());
+        assert!(!rep(Status::Warn).failed());
+        assert!(rep(Status::Warn).to_text().starts_with("[WARN] sandbox"));
+    }
 }
