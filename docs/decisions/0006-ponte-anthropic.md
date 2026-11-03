@@ -1,7 +1,7 @@
 # 0006 — Ponte Anthropic: tradução, stream e passthrough
 
 Data: 2026-11-02
-Status: proposta (F1-1; passa a aceita na F1-8, ao fim da fase)
+Status: Aceito
 
 ## Contexto
 
@@ -61,6 +61,14 @@ A [doc do Gemini](https://ai.google.dev/gemini-api/docs/generate-content/thought
 
 ### Aliases (Modo A)
 Seção opcional `[aliases]` no TOML, com glob simples, aplicada antes do roteamento, inclusive em `count_tokens`: quem aliasou um modelo não quer o prompt indo à Anthropic. O default de produção vem sem nenhuma.
+
+### Decisões da F1-5..F1-7
+- **count_tokens (F1-5)**: usa o `chars_per_token` do 1º degrau configurado da classe via `Scheduler::class_chars_per_token`, sem reservar cota e sem checar limite de pacote nem de contexto (é apenas a estimativa da requisição).
+- **Escopo do passthrough (F1-6, B2)**: passthrough byte a byte apenas para modelos `claude-*` (após a resolução de aliases); modelos `kax/*` vão para o roteador de classes; qualquer outro modelo (como `gpt-4o` ou `kax-coder` sem barra) retorna 404 no formato Anthropic (`not_found_error`) com a mensagem `"esta rota aceita apenas classes kax/* e modelos claude-*"`, registrando `Outcome::Rejected` no ledger.
+- **Client dedicado no passthrough (F1-6, B1)**: criado uma vez em `Live::build` e reconstruído no hot-reload, sem timeout total, com `connect_timeout(10s)` e `read_timeout(300s)` de inatividade entre chunks (motivo: stream longo de Opus/Sonnet facilmente ultrapassaria o timeout total de 60 s de uma requisição comum).
+- **Ledger do passthrough (F1-6)**: grava apenas metadados (timestamp, rota, provider, modelo, status HTTP, latência e outcome); o registro ocorre logo ao receber os headers do upstream (`latency_ms` = tempo até o primeiro byte / headers; morte no meio do stream não aparece no ledger porque o stream é entregue diretamente ao cliente via `bytes_stream`).
+- **Headers hop-by-hop e repetidos (F1-6, M1)**: headers hop-by-hop são removidos nos dois sentidos; headers repetidos na resposta do upstream (como múltiplos `set-cookie` ou headers customizados) são preservados via `HeaderMap::append`.
+- **Aliases em ordem de declaração (F1-7, M2)**: seção opcional `[aliases]` no TOML preserva a ordem de declaração (usando a feature `preserve_order` do crate `toml` e `Vec<(String, String)>`), onde o primeiro padrão que casar vence; o glob aceita apenas wildcard `*`; o destino é validado como classe existente no load e hot-reload; os aliases também valem em `/v1/chat/completions`; o `providers.toml` de produção permanece sem aliases.
 
 ## Consequências
 

@@ -73,3 +73,12 @@ Entradas mais recentes no fim. Formato e regras em `RUNBOOK.md`.
   - M2: Ordem de declaração de aliases no TOML preservada usando feature `preserve_order` do crate `toml` e `Vec<(String, String)>` com deserializer customizado. Primeiro padrão que casar vence. Testado via `aliases_preserve_declaration_order`.
   - M3: Doc comment `"/// Filtra e ordena os degraus elegíveis de class_id. Não debita nada."` restaurado sobre `pub fn pick` em `src/scheduler/mod.rs`.
 - testes: 185 unitários + 79 de integração verdes (total 264 testes, 0 ignored). Clippy e fmt 100% limpos.
+
+
+## 2026-11-02 21:18 — F1-8 documentação e roteiro de aceite — FEITO (revisão)
+- entrou:
+  - ADR 0006 (`docs/decisions/0006-ponte-anthropic.md`): status atualizado para "Aceito", com adição da seção "Decisões da F1-5..F1-7" cobrindo `count_tokens` (chars/token do 1º degrau, sem reserva/limite), escopo restrito de passthrough a `claude-*` (404 com `Outcome::Rejected` nos demais), client de passthrough dedicado sem timeout total, ledger apenas com metadados no 1º byte, remoção de headers hop-by-hop e preservação de múltiplos headers com `append`, além de aliases preservando ordem de declaração no TOML (também ativos em `/v1/chat/completions`).
+  - `CLAUDE.md`: atualização da seção "Fase atual" para Fase 1 com F1-1..F1-7 concluídas e F1-8 em revisão, totalizando 264 testes (185 unitários + 79 integração, 0 ignored). Adicionada seção curta "Como usar" com `ANTHROPIC_BASE_URL` e Modo A opcional (`ANTHROPIC_DEFAULT_HAIKU_MODEL` ou `[aliases]`).
+  - `docs/smoke/fase-1-aceite.md`: roteiro de aceite manual no PC nativo Windows em PowerShell para o Kaxcav, contendo instruções de compilação release e subida do gateway com `.env` local, validação de passthrough Sonnet e Opus (> 60s) sem corte e inspeção de metadados no ledger, 10 execuções do subagente Explore no Modo A (critério >= 8/10) com tabela de apuração, checklist de hipóteses não testadas (F1-1..F1-4) e seção de problemas conhecidos de baixa gravidade.
+  - `tasks.json`: F1-8 atualizada para status `"review"` (F1-5..F1-7 permanecem em `"review"`).
+- testes: 185 unitários + 79 de integração verdes (264 testes no total, 0 ignored). Nenhuma alteração de código em `src/`, `tests/`, `Cargo.*` ou `providers.toml`.

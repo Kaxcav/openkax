@@ -227,7 +227,7 @@
       "id": "F1-8",
       "title": "Docs: ADR 0006 Aceito, README/CLAUDE.md, docs/smoke/fase-1-aceite.md",
       "owner": "lead",
-      "status": "todo",
+      "status": "review",
       "depends": [
         "F1-4",
         "F1-5",
