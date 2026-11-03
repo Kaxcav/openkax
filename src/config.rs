@@ -996,9 +996,10 @@ mod tests {
             route("kax/summarizer"),
             [
                 "gemini/gemini-flash-lite",
+                "mistral/codestral",
                 "gemini/gemini-flash",
-                "cloudflare/llama-4-scout",
                 "openrouter/gemma-4-31b",
+                "cloudflare/llama-4-scout",
             ]
         );
         assert_eq!(
