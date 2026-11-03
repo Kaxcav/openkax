@@ -1,12 +1,12 @@
 //! Aceite do `kax-context` para Rust, índice, resolução e pack (ADR 0009).
 //!
-//! CONTRACT (P6a): os testes `#[ignore = "P6c"]` descrevem o comportamento
-//! que a P6c entrega; com os stubs eles falham (`cargo test -- --ignored`).
-//! A fixture é um crate de verdade (`tests/fixtures/context/rust`, confere com
-//! `cargo check --manifest-path`); linhas citadas abaixo são as dela.
+//! Escritos no CONTRACT (P6a) e ligados na P6c. A fixture é um crate de
+//! verdade (`tests/fixtures/context/rust`, confere com `cargo check
+//! --manifest-path`); linhas citadas abaixo são as dela.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use openkax::context::index::store_dir;
 use openkax::context::lang::RustAdapter;
@@ -117,7 +117,6 @@ fn rust_fixture_parses_cleanly() {
 // ---------------------------------------------------------------- adapter --
 
 #[test]
-#[ignore = "P6c"]
 fn rust_outline_of_geometry() {
     let src = read("src/geometry.rs");
     let facts = RustAdapter.extract(Path::new("src/geometry.rs"), &src);
@@ -228,7 +227,6 @@ fn rust_outline_of_geometry() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn rust_refs_and_imports_of_store() {
     let src = read("src/store.rs");
     let facts = RustAdapter.extract(Path::new("src/store.rs"), &src);
@@ -334,7 +332,6 @@ fn rust_refs_and_imports_of_store() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn rust_lib_module_and_mod_declarations() {
     let src = read("src/lib.rs");
     let facts = RustAdapter.extract(Path::new("src/lib.rs"), &src);
@@ -361,7 +358,6 @@ fn rust_lib_module_and_mod_declarations() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn rust_syntax_error_is_counted_not_fatal() {
     let facts = RustAdapter.extract(Path::new("src/broken.rs"), "pub fn ok() {}\npub fn x( {\n");
     assert!(facts.parse_errors > 0);
@@ -372,7 +368,6 @@ fn rust_syntax_error_is_counted_not_fatal() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn rust_inline_module_and_duplicate_ids() {
     let src = "mod inner {\n    pub fn f() {}\n}\n\nstruct S;\nimpl S {\n    fn g() {}\n}\nimpl S {\n    fn g() {}\n}\n";
     let facts = RustAdapter.extract(Path::new("src/dup.rs"), src);
@@ -406,7 +401,6 @@ fn rust_inline_module_and_duplicate_ids() {
 // ----------------------------------------------------------------- índice --
 
 #[test]
-#[ignore = "P6c"]
 fn index_outline_lists_symbols_in_source_order() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -467,7 +461,6 @@ fn index_outline_lists_symbols_in_source_order() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn symbol_finds_the_definition_with_exact_lines() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -498,7 +491,6 @@ fn symbol_finds_the_definition_with_exact_lines() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn same_name_in_two_modules_is_flagged_ambiguous() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -523,7 +515,6 @@ fn same_name_in_two_modules_is_flagged_ambiguous() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn callers_find_cross_module_sites() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -553,7 +544,6 @@ fn callers_find_cross_module_sites() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn refs_include_use_and_type_sites() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -586,7 +576,6 @@ fn refs_include_use_and_type_sites() {
 // -------------------------------------------------------------- resolução --
 
 #[test]
-#[ignore = "P6c"]
 fn resolution_tiers_and_hints() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -634,7 +623,6 @@ fn resolution_tiers_and_hints() {
 /// O import explícito vence a proximidade de diretório; sem import nem
 /// vizinhança, o caminho qualificado acha o alvo no degrau global.
 #[test]
-#[ignore = "P6c"]
 fn explicit_import_beats_a_sibling_with_the_same_name() {
     let d = tempfile::tempdir().unwrap();
     let root = d.path();
@@ -683,7 +671,6 @@ fn explicit_import_beats_a_sibling_with_the_same_name() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn method_with_unknown_receiver_is_ambiguous() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -718,7 +705,6 @@ fn layout(p: &ContextPack) -> Vec<(PackRole, &str, [u32; 2], Fidelity)> {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn pack_with_room_has_the_four_priorities() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -782,7 +768,6 @@ fn pack_with_room_has_the_four_priorities() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn pack_small_budget_keeps_the_target_and_lists_omitted() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -820,7 +805,6 @@ fn pack_small_budget_keeps_the_target_and_lists_omitted() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn pack_fills_in_priority_order() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -846,7 +830,6 @@ fn pack_fills_in_priority_order() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn pack_refuses_what_it_cannot_honour() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -877,7 +860,6 @@ fn pack_refuses_what_it_cannot_honour() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn pack_does_not_repeat_targets_or_shared_types() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -920,7 +902,6 @@ fn pack_does_not_repeat_targets_or_shared_types() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn pack_lists_an_ambiguous_dependency_instead_of_guessing() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -960,10 +941,56 @@ fn pack_lists_an_ambiguous_dependency_instead_of_guessing() {
     );
 }
 
+/// Trechos `full` que se tocam no mesmo arquivo saem fundidos, com o papel
+/// de maior prioridade; o dono que conteria o alvo (o trait de um método
+/// com corpo) entra só pela assinatura.
+#[test]
+fn pack_merges_touching_excerpts_and_signs_the_enclosing_owner() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path();
+    fs::create_dir_all(root.join("src")).unwrap();
+    let src = "/// A.\npub struct A;\npub fn f(a: A) -> A {\n    a\n}\n\npub trait T {\n    fn g(&self) -> u8 {\n        1\n    }\n}\n";
+    fs::write(root.join("src/lib.rs"), src).unwrap();
+    let idx = indexed(root);
+
+    let p = idx.pack(&["f"], 4000, CPT).unwrap();
+    assert_eq!(
+        layout(&p),
+        [(PackRole::Target, "src/lib.rs::f", [1, 5], Fidelity::Full)]
+    );
+    assert_eq!(
+        p.excerpts[0].text,
+        src.lines()
+            .take(5)
+            .map(|l| format!("{l}\n"))
+            .collect::<String>()
+    );
+    assert_eq!(p.tokens_estimated, tokens(&p.excerpts[0].text));
+
+    let p = idx.pack(&["T::g"], 4000, CPT).unwrap();
+    assert_eq!(
+        layout(&p),
+        [
+            (
+                PackRole::Target,
+                "src/lib.rs::T::g",
+                [8, 10],
+                Fidelity::Full
+            ),
+            (
+                PackRole::TypeDef,
+                "src/lib.rs::T",
+                [7, 7],
+                Fidelity::Signature
+            ),
+        ]
+    );
+    assert_eq!(p.excerpts[1].text, "pub trait T");
+}
+
 // ----------------------------------------------------------- incremental --
 
 #[test]
-#[ignore = "P6c"]
 fn refresh_reparses_only_the_changed_file() {
     let d = workdir();
     let root = d.path();
@@ -1005,7 +1032,6 @@ fn refresh_reparses_only_the_changed_file() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn walk_respects_gitignore_hidden_and_kax() {
     let d = workdir();
     let root = d.path();
@@ -1039,7 +1065,6 @@ fn walk_respects_gitignore_hidden_and_kax() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn crlf_is_normalized_and_limits_skip_files() {
     let d = tempfile::tempdir().unwrap();
     let root = d.path();
@@ -1066,4 +1091,57 @@ fn crlf_is_normalized_and_limits_skip_files() {
             "{f}"
         );
     }
+}
+
+// ---------------------------------------------------------- repo openkax --
+
+/// Indexa o próprio repo openkax: tempo do 1º `refresh` (frio, tudo parseado)
+/// e do 2º (quente, de outro `open` sobre o `index.json` salvo) e tamanho do
+/// índice. Os números saem com `cargo test -- --nocapture`; o teto é só
+/// informativo (no debug do CI, perto de 5 s viraria `#[ignore]`).
+#[test]
+fn index_the_openkax_repo() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let store = tempfile::tempdir().unwrap();
+
+    let t = Instant::now();
+    let mut idx = Index::open(root, store.path()).unwrap();
+    let cold = idx.refresh().unwrap();
+    let cold_time = t.elapsed();
+    idx.save().unwrap();
+    let index_bytes = fs::metadata(store.path().join("index.json")).unwrap().len();
+
+    let t = Instant::now();
+    let mut warm_idx = Index::open(root, store.path()).unwrap();
+    let warm = warm_idx.refresh().unwrap();
+    let warm_time = t.elapsed();
+
+    let file = fs::read_to_string(root.join("src/context/index.rs")).unwrap();
+    let p = idx.pack(&["Index::refresh"], 6000, CPT).unwrap();
+    eprintln!(
+        "openkax: {} arquivos, {} símbolos; frio {cold_time:?} ({cold:?}); \
+         quente {warm_time:?} ({warm:?}); index.json {index_bytes} B; \
+         pack de Index::refresh {} tokens contra {} do arquivo inteiro",
+        idx.stats().files,
+        idx.stats().symbols,
+        p.tokens_estimated,
+        tokens(&file),
+    );
+
+    assert!(cold.parsed > 50, "{cold:?}");
+    assert_eq!(warm.parsed, 0, "{warm:?}");
+    assert_eq!(warm.reused, cold.parsed + cold.reused);
+    assert_eq!(warm_idx.stats().parses_total, 0);
+
+    let def = &idx.symbol("Index::refresh").unwrap()[0];
+    assert_eq!(def.symbol.file, "src/context/index.rs");
+    assert_eq!(def.symbol.kind, SymbolKind::Method);
+    assert!(idx.callers("content_hash").unwrap().iter().any(|s| {
+        s.file == "src/context/index.rs"
+            && s.enclosing
+                .as_ref()
+                .is_some_and(|e| e.qual_name == "Index::refresh")
+    }));
+    assert_eq!(p.excerpts[0].role, PackRole::Target);
+    assert!(p.tokens_estimated < tokens(&file));
 }

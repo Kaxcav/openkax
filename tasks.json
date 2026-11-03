@@ -324,7 +324,7 @@
       "id": "P6a",
       "title": "CONTRACT do kax-context: src/context/ (tipos, trait LanguageAdapter, Index/resolve/pack com stub NotImplemented), deps tree-sitter, files[].symbols/lines no MCP, ADR 0009",
       "owner": "lead",
-      "status": "review",
+      "status": "done",
       "depends": [],
       "note": "ADR 0009 (proposta): estudo do gortex (commit 9241f04, só ideias, nada portado, sem NOTICE). Deps: tree-sitter 0.27.1 + rust 0.24.2, typescript 0.23.2, javascript 0.25.0, python 0.25.0; ignore 0.4.34; xxhash-rust 0.8.19 (xxh3). Índice persistido em JSON (<repo>/.kax/context/index.json), invalidado por xxh3-128. files[].symbols/lines só com mode=read, juntos recusados; até a P6d a validação recusa (invalid_input) em vez de mandar o arquivo inteiro. Sem eles o pacote é byte a byte o de antes (golden em tests/fixtures/mcp/). Aceite: 22 testes #[ignore = \"P6c\"] (tests/context_rust.rs) e 9 #[ignore = \"P6b\"] (tests/context_ts_py.rs), os 31 vermelhos com --ignored. Windows: 265 unitários + 110 de integração verdes (32 ignorados), clippy e fmt limpos. Binário release local: 4.180.992 B (main) -> 4.564.480 B, sem gramática dentro; o aumento é a unificação do regex/unicode do tree-sitter (tabelas Unicode do regex-syntax via env-filter)."
     },
@@ -342,11 +342,11 @@
       "id": "P6c",
       "title": "kax-context: adapter Rust, Index (percurso, hash, JSON), SymbolTable/resolve e pack",
       "owner": "lead",
-      "status": "todo",
+      "status": "review",
       "depends": [
         "P6a"
       ],
-      "note": "Fecha os 22 #[ignore = \"P6c\"] de tests/context_rust.rs. Medir o .exe e a memória privada com o índice ligado (informativo desde a decisão de 2026-11-03). Mesma regra de NOTICE da P6b."
+      "note": "PR draft feat/context-core. Os 22 #[ignore = \"P6c\"] de tests/context_rust.rs ligados, mais pack_merges_touching_excerpts_and_signs_the_enclosing_owner e index_the_openkax_repo. Decisões de implementação no ADR 0009, seção P6c (sem NOTICE: nada adaptado do gortex). Repo openkax em debug: 58 arquivos, 1.646 símbolos; Windows frio 0,61 s / quente 0,10 s; WSL frio 0,76 s / quente 0,29 s; index.json 4.034.737 B (~4,1x a fonte); pack de Index::refresh 1.669 tokens contra 6.195 do arquivo. Windows: 278 unitários + 134 de integração (10 ignorados: 9 P6b + 1 antigo); WSL: 282 + 133. Limite conhecido: nome do crate como 1º segmento (openkax::x em tests/ e main.rs) fica Unresolved. O .exe e a memória com o índice ligado ficam para a P6d (o main ainda não chama o índice)."
     },
     {
       "id": "P6d",
@@ -357,7 +357,7 @@
         "P6b",
         "P6c"
       ],
-      "note": "Tira a recusa 'ainda não são atendidos (P6d)' de TaskPacket::validate. Orçamento do pack a partir de max_packet_tokens e do chars_per_token do 1º degrau. Medição contra a baseline de arquivo inteiro (PLANO §2.3)."
+      "note": "Tira a recusa 'ainda não são atendidos (P6d)' de TaskPacket::validate. Orçamento do pack a partir de max_packet_tokens e do chars_per_token do 1º degrau. Medição contra a baseline de arquivo inteiro (PLANO §2.3). Medir o .exe e a memória privada com o índice ligado (informativo). Avaliar o tamanho do index.json (~4,1x a fonte na P6c): omitir campos vazios e não repetir file por símbolo/ref."
     }
   ]
 }

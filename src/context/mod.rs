@@ -17,9 +17,9 @@
 //!   hint + proximidade; empate vira [`Resolution::Ambiguous`].
 //! - [`pack`]: monta o [`ContextPack`] dentro de um orçamento de tokens.
 //!
-//! **CONTRACT (P6a).** Tipos e assinaturas valem; a lógica chega na P6b
-//! (adapters TS/JS e Python) e na P6c (adapter Rust, índice, resolução, pack).
-//! Até lá, os pontos de entrada devolvem [`ContextError::NotImplemented`].
+//! Etapas: P6a (CONTRACT: tipos e assinaturas), P6b (adapters TS/JS e
+//! Python), P6c (adapter Rust, índice, resolução e pack) e P6d (ligar
+//! `files[].symbols`/`lines` ao pacote).
 
 pub mod index;
 pub mod lang;
@@ -43,9 +43,6 @@ pub const INDEX_FORMAT_VERSION: u32 = 1;
 /// Erro do `kax-context`.
 #[derive(Debug, thiserror::Error)]
 pub enum ContextError {
-    /// Ponto de entrada do CONTRACT ainda sem lógica; o texto diz a etapa dona.
-    #[error("kax-context: {0} ainda não implementado")]
-    NotImplemented(&'static str),
     /// O arquivo não está no índice (fora da raiz, ignorado ou sem adapter).
     #[error("arquivo fora do índice: {0}")]
     UnknownFile(String),

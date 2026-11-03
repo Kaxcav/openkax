@@ -15,7 +15,7 @@ Modo B (MCP com pacote enxuto) é o principal. Modo A (rewrite de modelo via `AN
 **Fase 3 — processo e piloto (em preparação)** + **P6 `kax-context` em andamento** (ADR 0009, PRs `feat/context-*`).
 - Na `main`: Fase 0 (gateway), Fase 1 (ponte Anthropic, ADR 0006), Fase 2 (MCP `kax-workers`, ADR 0007), `doctor`/`report`, sandbox do verify (ADR 0008), rota do `kax/summarizer` com codestral como 2º degrau.
 - Fase 3: processo (`.kax/verify.toml`, `CONVENTIONS.md`, `docs/processo/pacote.md`, hooks, métricas) e piloto de 10–14 tarefas reais com go/no-go do `PLANO_MESTRE.md` §4 (aceitação `coder-smart` ≥ 60%, retrabalho < 0.7). O piloto mede pacote fatiado pelo `kax-context` × arquivo inteiro.
-- P6 `kax-context` (`src/context/`): P6a (CONTRACT) no PR `feat/context-contract`; P6b (adapters TS/JS e Python), P6c (adapter Rust, índice, resolução, pack) e P6d (ligar `files[].symbols`/`lines` ao pacote) a fazer. Aceite: `cargo test -- --ignored` em `tests/context_rust.rs` (P6c) e `tests/context_ts_py.rs` (P6b).
+- P6 `kax-context` (`src/context/`): P6a (CONTRACT) na `main` (PR #10). P6c (adapter Rust, índice, resolução, pack) no PR draft `feat/context-core`, com os 22 testes de `tests/context_rust.rs` ligados. P6b (adapters TS/JS e Python) em paralelo: fecha os 9 `#[ignore = "P6b"]` de `tests/context_ts_py.rs`. P6d (ligar `files[].symbols`/`lines` ao pacote) a fazer.
 - Ver `tasks.json`.
 
 ## Como usar

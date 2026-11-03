@@ -1,7 +1,8 @@
 # 0009 — kax-context: contexto enxuto por símbolo nos pacotes dos operários
 
 Data: 2026-11-03
-Status: Proposta (PR `feat/context-contract`, P6a — CONTRACT)
+Status: Proposta. P6a (CONTRACT) na `main` pelo PR #10; P6c no PR
+`feat/context-core`.
 
 ## Contexto
 
@@ -223,6 +224,59 @@ ao `build_request` e medir (≥ 3× menor, com aceitação ≥ a de hoje).
   Windows e dos runners `windows-latest`, as fixtures mudariam de bytes no
   checkout.
 - O `NotImplemented` sai de cena na P6c, e a recusa de `symbols`/`lines`, na P6d.
+
+## P6c — decisões de implementação (2026-11-03)
+
+PR `feat/context-core`. Nada foi adaptado do gortex nesta etapa: o adapter
+Rust percorre a árvore com cursor, sem query tree-sitter, e a heurística de
+resolução é a do item 5 acima, escrita do zero. Por isso continua sem
+`NOTICE`.
+
+- **Adapter Rust.** O percurso é iterativo, com pilha explícita, para que uma
+  expressão muito aninhada não estoure a pilha da thread (1 MiB no Windows).
+  `self.f()` sai com `qual_hint = "self"` e `method = true`, e o `self` vira o
+  tipo do contêiner. O nome do impl é o cabeçalho com os espaços colapsados
+  (`impl !Send for X` mantém o `!`). Os métodos levam o tipo-base, sem
+  genéricos nem `&`. Itens dentro do corpo de uma fn valem pelo módulo, sem o
+  dono. `Self` em posição de tipo não vira ref. `use a::{self}` vira o import
+  de `a`, com origem no pai de `a`. Macros não são expandidas: o que está em
+  `foo!(...)` não gera ref.
+- **Resolução.** Uma `call` com `qual_hint` e sem `method` também aceita
+  método (`Rect::new`, `Rect.square`). A ref `use` não expande imports, porque
+  o hint dela é a própria origem. Hint absoluto (`crate::`, `self::`,
+  `super::`, `Self`, `this`, `self`/`cls` do Python, origem relativa `./m` ou
+  `.m`) exige contêiner igual. `crate::` também exige o mesmo crate (a pasta
+  antes do último `src/`). Os outros hints casam pelo sufixo.
+  **Limite conhecido:** o nome do crate como 1º segmento (`openkax::context::
+  Index` em `tests/` e no `main.rs`) não é conhecido do índice e fica
+  `Unresolved`. Ler o `[package].name` dos `Cargo.toml` resolveria isso.
+- **Índice.** Os `.gitignore` acima da raiz não valem (`parents(false)`), e
+  links não são seguidos. Um arquivo antes indexado que passa a ser pulado
+  conta em `skipped` e em `removed`. As consultas releem o texto e conferem o
+  hash: se o arquivo mudou depois do `refresh`, devolvem `ContextError::Io`
+  em vez de linhas trocadas. No `open`, uma entrada persistida com caminho fora
+  da raiz é descartada.
+- **Pack.** O dono de um método de `impl` é resolvido pela ref de tipo do
+  cabeçalho do impl, que preserva o caminho escrito. Uma `call` que resolve
+  para um tipo (`new X()`, `X()`) entra como `type_def`. Um chamador cujo
+  sítio é ambíguo vai para `omitted` como `ambiguous`, com o id dele. Uma
+  definição inteira que conteria um trecho já incluído (a classe ou o trait de
+  um método alvo) entra só pela assinatura. Trechos `full` do mesmo arquivo
+  que se tocam ou se sobrepõem saem fundidos, com o papel e o símbolo do de
+  maior prioridade. Um `chars_per_token` não positivo vale 1.
+- **Medição no próprio repo** (`index_the_openkax_repo`, debug): no Windows,
+  58 arquivos e 1.646 símbolos; refresh frio em 0,61 s, quente (outro `open`
+  sobre o índice salvo) em 0,10 s. No WSL (Ubuntu 24.04, repo em `/mnt/d`),
+  frio em 0,76 s e quente em 0,29 s, com um `index.json` do mesmo tamanho (o
+  checkout do Windows tem CRLF, e os spans são do texto normalizado).
+  O `index.json` tem 4.034.737 B, cerca de
+  4,1× os 981.778 B de fonte. O pack de `Index::refresh` dá 1.669 tokens,
+  contra 6.195 do arquivo inteiro (3,7× menor). O tamanho do índice está na
+  margem do "se crescer demais" da decisão 4. As saídas mais baratas, se a
+  P6d pedir, são omitir os campos vazios e não repetir o `file` em cada
+  símbolo e ref.
+- **Binário.** O `main` ainda não chama o índice, então as gramáticas
+  continuam fora do `.exe`. A medição com elas passa para a P6d.
 
 ## Atribuição
 
