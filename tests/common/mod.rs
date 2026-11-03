@@ -289,3 +289,16 @@ pub async fn ledger_lines(dir: &std::path::Path, n: usize) -> Vec<Value> {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
+
+/// Escreve `<repo>/.kax/verify.toml` com `sandbox = "none"` (+ `extra`): estes
+/// testes exercitam o fluxo da tarefa, não a caixa (que tem testes próprios
+/// em `src/verify.rs`) e rodam também no Windows.
+pub fn allow_unsandboxed(repo: &std::path::Path, extra: &str) {
+    let dir = repo.join(".kax");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("verify.toml"),
+        format!("sandbox = \"none\"\n{extra}"),
+    )
+    .unwrap();
+}

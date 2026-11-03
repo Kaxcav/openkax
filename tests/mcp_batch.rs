@@ -35,6 +35,7 @@ fn temp_repo() -> tempfile::TempDir {
     std::fs::write(dir.path().join("value.txt"), "OLD\n").unwrap();
     git(dir.path(), &["add", "."]);
     git(dir.path(), &["commit", "-q", "-m", "init"]);
+    common::allow_unsandboxed(dir.path(), "");
     dir
 }
 

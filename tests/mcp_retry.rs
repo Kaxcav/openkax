@@ -37,6 +37,7 @@ fn temp_repo() -> tempfile::TempDir {
     std::fs::write(dir.path().join("value.txt"), "OLD\n").unwrap();
     git(dir.path(), &["add", "."]);
     git(dir.path(), &["commit", "-q", "-m", "init"]);
+    common::allow_unsandboxed(dir.path(), "");
     dir
 }
 
@@ -225,4 +226,49 @@ async fn failed_attempt_log_is_appended_to_next_packet() {
     assert!(!first.contains("Tentativa anterior falhou"));
     assert!(second.contains("Tentativa anterior falhou"), "{second}");
     assert!(second.contains("git grep"), "{second}");
+}
+
+/// `sandbox = "none"` explícito roda e deixa o aviso no log da tarefa (R1).
+#[tokio::test]
+async fn sandbox_none_leaves_warning_in_task_log() {
+    let (groq, gemini) = (MockServer::start().await, MockServer::start().await);
+    mount(&groq, &diff_to("GOOD"), 1).await;
+    mount(&gemini, &diff_to("GOOD"), 0).await;
+    let repo = temp_repo();
+    let app = app(&groq, &gemini, tempfile::tempdir().unwrap().path());
+
+    let r = run_task(&app, repo.path(), "main", &packet("T-6", 2)).await;
+
+    assert_eq!(r.status, TaskStatus::Accepted, "{r:?}");
+    assert!(
+        r.verify_log.contains("sandbox = \"none\""),
+        "{}",
+        r.verify_log
+    );
+}
+
+/// Sem bwrap na plataforma (Windows/macOS) o padrão recusa antes de chamar o
+/// operário: nenhuma chamada ao provider, `needs_lead` com a mensagem.
+#[cfg(not(target_os = "linux"))]
+#[tokio::test]
+async fn default_sandbox_is_refused_before_calling_the_worker() {
+    let (groq, gemini) = (MockServer::start().await, MockServer::start().await);
+    mount(&groq, &diff_to("GOOD"), 0).await;
+    mount(&gemini, &diff_to("GOOD"), 0).await;
+    let repo = temp_repo();
+    std::fs::remove_file(repo.path().join(".kax/verify.toml")).unwrap();
+    let app = app(&groq, &gemini, tempfile::tempdir().unwrap().path());
+
+    let r = run_task(&app, repo.path(), "main", &packet("T-7", 2)).await;
+
+    assert_eq!(r.status, TaskStatus::NeedsLead, "{r:?}");
+    assert_eq!(r.attempts, 0);
+    assert!(
+        r.verify_log
+            .contains("sandbox indisponível nesta plataforma"),
+        "{}",
+        r.verify_log
+    );
+    groq.verify().await;
+    gemini.verify().await;
 }
