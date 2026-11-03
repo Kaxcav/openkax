@@ -222,7 +222,9 @@ impl AppState {
         let c = v.config().class(class)?;
         Some((
             c.max_packet_tokens,
-            v.config().defaults.estimate_chars_per_token,
+            v.scheduler()
+                .class_chars_per_token(class)
+                .unwrap_or(v.config().defaults.estimate_chars_per_token),
         ))
     }
 
@@ -1344,5 +1346,59 @@ mod tests {
         assert_eq!(acc[&0]["function"]["arguments"], "{\"q\":\"x\"}");
         assert_eq!(acc[&0]["id"], "c1");
         assert_eq!(acc[&1]["function"]["name"], "ls");
+    }
+
+    #[test]
+    fn packet_limits_returns_calibrated_chars_per_token_after_settle() {
+        let toml = r#"
+            [defaults]
+            request_timeout_ms = 5000
+            first_token_timeout_ms = 1000
+            estimate_chars_per_token = 3.6
+
+            [[provider]]
+            id = "p"
+            base_url = "http://127.0.0.1:1"
+            auth = { kind = "none" }
+            models = [{ id = "m", upstream = "m", max_ctx = 128000, limits = { rpm = 30 } }]
+
+            [[class]]
+            id = "kax/fast"
+            max_packet_tokens = 50000
+            route = [{ provider = "p", model = "m" }]
+        "#;
+        let config = Config::from_toml_str(toml).unwrap();
+        let deps = Deps::new(config, Secrets::default());
+        let state = AppState::new(deps).unwrap();
+
+        // Antes de qualquer chamada: valor padrão (3.6)
+        let (max_packet, cpt0) = state.packet_limits("kax/fast").unwrap();
+        assert_eq!(max_packet, 50000);
+        assert!((cpt0 - 3.6).abs() < 1e-6);
+
+        // Reserva e liquida com usage real que altera o chars_per_token
+        let req: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "kax/fast",
+            "messages": [{ "role": "user", "content": "x".repeat(100) }]
+        }))
+        .unwrap();
+        let picked = state.scheduler().pick("kax/fast", &req).unwrap();
+        let cand = picked.candidates.into_iter().next().unwrap();
+        let reservation = state.scheduler().reserve(&cand).unwrap();
+
+        // observed = 100 chars / 50 tokens = 2.0 chars/token
+        // ema = 0.8 * 3.6 + 0.2 * 2.0 = 3.28
+        let usage = Usage {
+            prompt_tokens: 50,
+            completion_tokens: 10,
+            total_tokens: 60,
+        };
+        reservation.settle(Some(usage));
+
+        // packet_limits deve refletir o valor calibrado (3.28)
+        let (max_packet, cpt1) = state.packet_limits("kax/fast").unwrap();
+        assert_eq!(max_packet, 50000);
+        assert!((cpt1 - 3.28).abs() < 1e-4);
+        assert_ne!(cpt1, cpt0);
     }
 }
