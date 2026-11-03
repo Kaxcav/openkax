@@ -6,15 +6,26 @@
 //!   erros antes disso caem no próximo candidato sem o cliente perceber.
 //! - Header `x-openkax-provider` identifica o provider que respondeu.
 //! - Morte pós-1º-token: chunk final com `finish_reason: "error"` + `data: [DONE]`.
+//! - `finish_reason: "error"` antes do 1º token conta como erro do candidato.
 //! - Nenhum candidato disponível: `429` com `Retry-After` (segundos, arredondado pra cima).
 //! - Erro de culpa da request (400/413/422): no máximo 1 candidato extra; dois
 //!   seguidos → status do upstream devolvido ao cliente (ADR 0003, A3).
 //! - Deltas de raciocínio nunca chegam ao cliente (ADR 0004, N4).
+//! - `usage` só sai se o cliente pediu (`stream_options.include_usage`), uma vez,
+//!   num chunk de `choices` vazio logo antes de `[DONE]`, seja qual for o formato
+//!   do upstream (F0-24).
+//! - Índices de `tool_calls` chegam ao cliente estáveis e sequenciais, mesmo com
+//!   upstream que omite ou repete `index` em chamadas paralelas (F0-24).
 //! - `x-openkax-exclude-family: glm,qwen` tira famílias da rota (N5).
 //! - `x-openkax-max-tier: free` tira degraus credit/paid da rota.
 //! - `x-openkax-pin: provider/modelo` (depuração) fixa o candidato; continua
 //!   passando por reserva/ledger; modelo desabilitado → 409. Com pin, a resposta
 //!   traz os headers de limite do upstream como `x-openkax-upstream-<nome>`.
+//!
+//! `POST /v1/messages` usa o mesmo despacho; só a forma da resposta e do erro muda
+//! ([`Wire`], módulo [`anthropic`], ADR 0006).
+
+mod anthropic;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -24,7 +35,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -54,6 +65,9 @@ pub const EXCLUDE_FAMILY_HEADER: &str = "x-openkax-exclude-family";
 pub const MAX_TIER_HEADER: &str = "x-openkax-max-tier";
 /// Header de request (depuração): `provider/modelo` fixo.
 pub const PIN_HEADER: &str = "x-openkax-pin";
+/// Teto do corpo de `/v1/messages`. O padrão do axum (2 MiB) recusaria imagem em
+/// base64, que o Claude Code manda inline.
+pub const MESSAGES_BODY_LIMIT: usize = 32 * 1024 * 1024;
 
 /// Dependências externas do servidor; tudo injetável para teste.
 pub struct Deps {
@@ -105,6 +119,7 @@ struct Live {
     secrets: Secrets,
     scheduler: Scheduler,
     client: ProviderClient,
+    passthrough_client: reqwest::Client,
 }
 
 impl Live {
@@ -115,6 +130,7 @@ impl Live {
     ) -> Result<Self, StartupError> {
         let http =
             provider::build_http_client(Duration::from_millis(config.defaults.request_timeout_ms))?;
+        let passthrough_client = provider::build_passthrough_client()?;
         let scheduler = Scheduler::new(&config, clock, &|env| secrets.get(env).is_some());
         let lookup = |k: &str| secrets.get(k).map(str::to_owned);
         let resolved = config
@@ -128,6 +144,7 @@ impl Live {
             secrets,
             scheduler,
             client: ProviderClient::new(http),
+            passthrough_client,
         })
     }
 }
@@ -151,6 +168,10 @@ impl View {
 
     fn ledger(&self) -> &LedgerHandle {
         &self.hub.ledger
+    }
+
+    fn passthrough_client(&self) -> &reqwest::Client {
+        &self.live.passthrough_client
     }
 
     fn api_key(&self, provider_idx: usize) -> Option<&str> {
@@ -304,6 +325,14 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/v1/chat/completions", post(chat_completions))
+        .route(
+            "/v1/messages",
+            post(anthropic::messages).layer(DefaultBodyLimit::max(MESSAGES_BODY_LIMIT)),
+        )
+        .route(
+            "/v1/messages/count_tokens",
+            post(anthropic::count_tokens).layer(DefaultBodyLimit::max(MESSAGES_BODY_LIMIT)),
+        )
         .route("/v1/models", get(models))
         .route("/quota", get(quota))
         .with_state(state)
@@ -358,6 +387,45 @@ fn error_response(status: StatusCode, kind: &str, message: &str) -> Response {
     (status, axum::Json(body)).into_response()
 }
 
+/// Protocolo de entrada: decide a forma da resposta e do erro. A política de
+/// fallback é uma só, em [`dispatch`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Wire {
+    OpenAi,
+    Anthropic,
+}
+
+impl Wire {
+    /// `kind` é o `type` do OpenAI; a Anthropic deriva o dela do status.
+    fn error(self, status: StatusCode, kind: &str, message: &str) -> Response {
+        match self {
+            Self::OpenAi => error_response(status, kind, message),
+            Self::Anthropic => anthropic::error_response(status, message),
+        }
+    }
+
+    /// Erro de request do upstream, com o status dele.
+    fn upstream_fault(self, status: StatusCode, message: &str) -> Response {
+        match self {
+            Self::OpenAi => upstream_fault_response(status, message),
+            Self::Anthropic => {
+                anthropic::error_response(status, &anthropic::upstream_message(message))
+            }
+        }
+    }
+
+    /// 429 de rate limit, com `Retry-After` se houver prazo.
+    fn rate_limited(self, wait: Option<Duration>, message: &str) -> Response {
+        let mut r = self.error(StatusCode::TOO_MANY_REQUESTS, "rate_limit_error", message);
+        if let Some(wait) = wait {
+            let secs = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
+            r.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from(secs.max(1)));
+        }
+        r
+    }
+}
+
 /// Campos comuns do registro de ledger de uma request.
 struct Meta {
     route: String,
@@ -406,6 +474,7 @@ impl Meta {
             reasoning: self.reasoning,
             pinned: self.pinned,
             outcome,
+            status: None,
         }));
     }
 }
@@ -434,7 +503,7 @@ async fn chat_completions(
             );
         }
     };
-    let mut meta = Meta {
+    let meta = Meta {
         route: req.model.clone(),
         est_in: 0,
         started,
@@ -450,14 +519,27 @@ async fn chat_completions(
             "esta rota aceita apenas classes kax/* (veja /v1/models)",
         );
     }
-    let pick = match choose(&st, &headers, &req) {
+    dispatch(&st, &headers, &req, Wire::OpenAi, meta).await
+}
+
+/// Roteia pelo scheduler com fallback pré-1º-token. `req` é sempre OpenAI, com a
+/// classe em `model`; `wire` diz em que forma o cliente recebe a resposta.
+async fn dispatch(
+    st: &View,
+    headers: &HeaderMap,
+    req: &ChatCompletionRequest,
+    wire: Wire,
+    mut meta: Meta,
+) -> Response {
+    let started = meta.started;
+    let pick = match choose(st, headers, req, wire) {
         Ok(p) => p,
         Err(resp) => {
-            meta.record(&st, None, None, None, Outcome::Rejected);
+            meta.record(st, None, None, None, Outcome::Rejected);
             return resp;
         }
     };
-    meta.pinned = header_str(&headers, PIN_HEADER).is_some();
+    meta.pinned = header_str(headers, PIN_HEADER).is_some();
     meta.est_in = pick.candidates.first().map_or(0, |c| c.est_tokens);
 
     let mut waits: Vec<Duration> = pick.retry_after().into_iter().collect();
@@ -491,7 +573,7 @@ async fn chat_completions(
                 st.api_key(cand.provider_idx),
                 &cand.upstream_model,
                 cand.max_tokens_override,
-                &req,
+                req,
                 first_token_timeout,
                 first_token_timeout_reasoning,
             )
@@ -506,10 +588,18 @@ async fn chat_completions(
             Ok(stream) => {
                 res.first_token();
                 let ttft = started.elapsed();
-                let mut resp = if req.is_stream() {
-                    stream_response(st.clone(), meta, cand.clone(), res, stream, ttft, &req)
-                } else {
-                    aggregate_response(&st, meta, cand, res, stream, ttft).await
+                let mut resp = match (wire, req.is_stream()) {
+                    (Wire::OpenAi, true) => {
+                        stream_response(st.clone(), meta, cand.clone(), res, stream, ttft, req)
+                    }
+                    (Wire::OpenAi, false) => {
+                        aggregate_response(st, meta, cand, res, stream, ttft).await
+                    }
+                    (Wire::Anthropic, is_stream) => {
+                        let relay =
+                            new_relay(st.clone(), meta, cand.clone(), res, stream, ttft, false);
+                        anthropic::respond(relay, req, is_stream).await
+                    }
                 };
                 add_upstream_headers(&mut resp, &debug_headers);
                 return resp;
@@ -522,18 +612,16 @@ async fn chat_completions(
                 };
                 res.fail(&e);
                 meta.fallbacks += 1;
-                meta.record(&st, Some(cand), None, None, outcome);
+                meta.record(st, Some(cand), None, None, outcome);
                 let mut resp = match &e {
-                    UpstreamError::RequestFault { status, message } => upstream_fault_response(
+                    UpstreamError::RequestFault { status, message } => wire.upstream_fault(
                         StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_REQUEST),
                         message,
                     ),
-                    UpstreamError::RateLimited { .. } => error_response(
-                        StatusCode::TOO_MANY_REQUESTS,
-                        "rate_limit_error",
-                        &e.to_string(),
-                    ),
-                    _ => error_response(StatusCode::BAD_GATEWAY, "upstream_error", &e.to_string()),
+                    UpstreamError::RateLimited { retry_after, .. } => {
+                        wire.rate_limited(*retry_after, &e.to_string())
+                    }
+                    _ => wire.error(StatusCode::BAD_GATEWAY, "upstream_error", &e.to_string()),
                 };
                 add_upstream_headers(&mut resp, &debug_headers);
                 return resp;
@@ -561,30 +649,25 @@ async fn chat_completions(
     }
 
     if last_was_fault && let Some((status, message)) = fault {
-        meta.record(&st, None, None, None, Outcome::RequestFault);
+        meta.record(st, None, None, None, Outcome::RequestFault);
         let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST);
-        return upstream_fault_response(status, &message);
+        return wire.upstream_fault(status, &message);
     }
-    meta.record(&st, None, None, None, Outcome::Exhausted);
+    meta.record(st, None, None, None, Outcome::Exhausted);
     if let Some(wait) = waits.into_iter().filter(|d| !d.is_zero()).min() {
-        let secs = wait.as_secs() + u64::from(wait.subsec_nanos() > 0);
-        let mut r = error_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            "rate_limit_error",
+        return wire.rate_limited(
+            Some(wait),
             "todos os providers da classe estão sem saldo ou em cooldown",
         );
-        r.headers_mut()
-            .insert(header::RETRY_AFTER, HeaderValue::from(secs.max(1)));
-        return r;
     }
     if pick.all_never_fit() {
-        return error_response(
+        return wire.error(
             StatusCode::PAYLOAD_TOO_LARGE,
             "invalid_request_error",
             "a request não cabe em nenhum provider da classe (max_ctx/TPM)",
         );
     }
-    error_response(
+    wire.error(
         StatusCode::SERVICE_UNAVAILABLE,
         "service_unavailable",
         "nenhum provider disponível para a classe",
@@ -593,17 +676,23 @@ async fn chat_completions(
 
 /// Escolhe os candidatos: pin (depuração) ou rota da classe com filtros.
 #[allow(clippy::result_large_err)]
-fn choose(st: &View, headers: &HeaderMap, req: &ChatCompletionRequest) -> Result<Pick, Response> {
+fn choose(
+    st: &View,
+    headers: &HeaderMap,
+    req: &ChatCompletionRequest,
+    wire: Wire,
+) -> Result<Pick, Response> {
     let pick_err = |e: PickError| {
         let status = match e {
             PickError::UnknownClass(_) => StatusCode::NOT_FOUND,
             PickError::PacketTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
         };
-        error_response(status, "invalid_request_error", &e.to_string())
+        wire.error(status, "invalid_request_error", &e.to_string())
     };
+    let class = st.config().resolve_alias(&req.model).unwrap_or(&req.model);
     if let Some(pin) = header_str(headers, PIN_HEADER) {
         let Some((provider, model)) = pin.split_once('/') else {
-            return Err(error_response(
+            return Err(wire.error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
                 "x-openkax-pin deve ser provider/modelo",
@@ -611,10 +700,10 @@ fn choose(st: &View, headers: &HeaderMap, req: &ChatCompletionRequest) -> Result
         };
         return st
             .scheduler()
-            .pick_pinned(&req.model, provider, model, req)
+            .pick_pinned(class, provider, model, req)
             .map_err(|e| match e {
                 PinError::Pick(e) => pick_err(e),
-                PinError::UnknownTarget => error_response(
+                PinError::UnknownTarget => wire.error(
                     StatusCode::NOT_FOUND,
                     "model_not_found",
                     &format!("pin {pin:?}: provider/modelo inexistente"),
@@ -624,7 +713,7 @@ fn choose(st: &View, headers: &HeaderMap, req: &ChatCompletionRequest) -> Result
                         .ok()
                         .and_then(|v| v.as_str().map(str::to_owned))
                         .unwrap_or_default();
-                    error_response(
+                    wire.error(
                         StatusCode::CONFLICT,
                         "model_disabled",
                         &format!("pin {pin:?}: modelo desabilitado ({reason})"),
@@ -637,7 +726,7 @@ fn choose(st: &View, headers: &HeaderMap, req: &ChatCompletionRequest) -> Result
         Some(v) => match serde_json::from_value::<Tier>(Value::String(v.to_ascii_lowercase())) {
             Ok(t) => Some(t),
             Err(_) => {
-                return Err(error_response(
+                return Err(wire.error(
                     StatusCode::BAD_REQUEST,
                     "invalid_request_error",
                     "x-openkax-max-tier deve ser free, credit ou paid",
@@ -657,7 +746,7 @@ fn choose(st: &View, headers: &HeaderMap, req: &ChatCompletionRequest) -> Result
         max_tier,
     };
     st.scheduler()
-        .pick_with(&req.model, req, &opts)
+        .pick_with(class, req, &opts)
         .map_err(pick_err)
 }
 
@@ -688,6 +777,10 @@ fn sse_bytes(chunk: &ChatCompletionChunk) -> Bytes {
 
 const DONE: &str = "data: [DONE]\n\n";
 
+/// O provider morreu depois do 1º token. O detalhe fica no log: pode trazer trecho
+/// do corpo do upstream.
+const INTERRUPTED: &str = "o provider interrompeu a resposta no meio; reenvie a request";
+
 fn output_chars(chunk: &ChatCompletionChunk) -> usize {
     chunk
         .choices
@@ -705,6 +798,80 @@ fn output_chars(chunk: &ChatCompletionChunk) -> usize {
         .sum()
 }
 
+/// Dá a cada chamada paralela o seu índice. Há upstream que omite `index` ou
+/// repete o mesmo em chamadas diferentes; o `id` novo é o que marca a chamada. Sem
+/// `id` nenhum, marca a chamada o nome novo, ou o nome com argumentos depois de um
+/// JSON já completo; nome repetido em chunk de continuação não conta.
+#[derive(Default)]
+struct ToolIndexer {
+    /// Por índice devolvido ao cliente.
+    slots: Vec<ToolSlot>,
+}
+
+#[derive(Default)]
+struct ToolSlot {
+    upstream_index: Option<u64>,
+    id: String,
+    name: String,
+    args: String,
+}
+
+impl ToolSlot {
+    fn starts_new_call(&self, name: &str, args: &str) -> bool {
+        !name.is_empty()
+            && !self.name.is_empty()
+            && (name != self.name
+                || (!args.is_empty()
+                    && serde_json::from_str::<serde::de::IgnoredAny>(&self.args).is_ok()))
+    }
+}
+
+impl ToolIndexer {
+    fn normalize(&mut self, delta: &mut Value) {
+        let up = delta["index"].as_u64();
+        let id = delta["id"].as_str().unwrap_or("").to_owned();
+        let name = delta["function"]["name"].as_str().unwrap_or("").to_owned();
+        let args = delta["function"]["arguments"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        let by_index =
+            up.and_then(|u| self.slots.iter().rposition(|s| s.upstream_index == Some(u)));
+        let found = if id.is_empty() {
+            // Continuação: a chamada daquele índice ou, sem índice, a última.
+            let target = if up.is_some() {
+                by_index
+            } else {
+                self.slots.len().checked_sub(1)
+            };
+            target.filter(|&i| !self.slots[i].starts_new_call(&name, &args))
+        } else {
+            self.slots
+                .iter()
+                .position(|s| s.id == id)
+                .or(by_index.filter(|&i| self.slots[i].id.is_empty()))
+        };
+        let slot = found.unwrap_or_else(|| {
+            self.slots.push(ToolSlot {
+                upstream_index: up,
+                ..ToolSlot::default()
+            });
+            self.slots.len() - 1
+        });
+        let entry = &mut self.slots[slot];
+        if !id.is_empty() {
+            entry.id = id;
+        }
+        if entry.name.is_empty() {
+            entry.name = name;
+        }
+        entry.args.push_str(&args);
+        if let Some(o) = delta.as_object_mut() {
+            o.insert("index".into(), slot.into());
+        }
+    }
+}
+
 /// Repassa prelúdio + resto do upstream ao cliente; dono da `Reservation`.
 /// Dropado antes do fim (cliente desconectou) → `Reservation::drop` cobra o
 /// estimado sem cooldown e o ledger registra `client_disconnected`.
@@ -718,6 +885,7 @@ struct Relay {
     usage: Option<Usage>,
     ttft: Duration,
     forward_usage: bool,
+    tools: ToolIndexer,
     last: (String, u64, String),
     finished: bool,
 }
@@ -732,13 +900,37 @@ impl Relay {
         if let Some(r) = &mut self.res {
             r.add_output_chars(output_chars(chunk) + reasoning);
         }
-        if chunk.usage.is_some() {
-            self.usage = chunk.usage;
+        for c in chunk.choices.iter_mut().filter(|c| c.index == 0) {
+            for t in c.delta.tool_calls.iter_mut().flatten() {
+                self.tools.normalize(t);
+            }
+        }
+        // O último vale; quem repassa é `usage_chunk`, no fim (F0-24): há upstream
+        // que manda `usage` em todo chunk, e há cliente que trata isso como o fim.
+        if let Some(u) = chunk.usage.take() {
+            self.usage = Some(u);
         }
         if !chunk.id.is_empty() {
             self.last = (chunk.id.clone(), chunk.created, chunk.model.clone());
         }
-        !provider::is_empty_chunk(chunk) && (!chunk.choices.is_empty() || self.forward_usage)
+        !provider::is_empty_chunk(chunk)
+    }
+
+    /// Chunk final com `usage`, se o cliente pediu e o upstream informou.
+    fn usage_chunk(&self) -> Option<ChatCompletionChunk> {
+        if !self.forward_usage {
+            return None;
+        }
+        let (id, created, model) = self.last.clone();
+        Some(ChatCompletionChunk {
+            id,
+            object: "chat.completion.chunk".into(),
+            created,
+            model,
+            choices: Vec::new(),
+            usage: Some(self.usage?),
+            extra: Default::default(),
+        })
     }
 
     fn finish_ok(&mut self) {
@@ -755,7 +947,7 @@ impl Relay {
         );
     }
 
-    fn finish_err(&mut self, e: &UpstreamError) -> Bytes {
+    fn finish_err(&mut self, e: &UpstreamError) {
         self.finished = true;
         tracing::warn!(provider = %self.cand.provider_id, model = %self.cand.model_id, error = %e, "stream interrompido após o 1º token");
         if let Some(r) = self.res.take() {
@@ -768,6 +960,10 @@ impl Relay {
             Some(self.ttft),
             Outcome::MidStreamError,
         );
+    }
+
+    /// O que o cliente OpenAI recebe depois de uma morte no meio.
+    fn error_tail(&self) -> Bytes {
         let (id, created, model) = self.last.clone();
         let chunk = ChatCompletionChunk {
             id,
@@ -783,32 +979,49 @@ impl Relay {
             extra: Default::default(),
         };
         let mut out = sse_bytes(&chunk).to_vec();
+        if let Some(u) = self.usage_chunk() {
+            out.extend_from_slice(&sse_bytes(&u));
+        }
         out.extend_from_slice(DONE.as_bytes());
         Bytes::from(out)
     }
 
-    async fn next_bytes(&mut self) -> Option<Bytes> {
+    /// Próximo chunk para o cliente, já normalizado. `Ok(None)`: o upstream acabou.
+    /// Quem chama fecha com [`finish_ok`](Self::finish_ok) ou
+    /// [`finish_err`](Self::finish_err).
+    async fn next_chunk(&mut self) -> Result<Option<ChatCompletionChunk>, UpstreamError> {
         loop {
-            if self.finished {
-                return None;
+            let mut chunk = match self.prelude.pop_front() {
+                Some(c) => c,
+                None => match self.rest.next().await {
+                    Some(Ok(c)) => c,
+                    Some(Err(e)) => return Err(e),
+                    None => return Ok(None),
+                },
+            };
+            if self.observe(&mut chunk) {
+                return Ok(Some(chunk));
             }
-            if let Some(mut c) = self.prelude.pop_front() {
-                if self.observe(&mut c) {
-                    return Some(sse_bytes(&c));
-                }
-                continue;
+        }
+    }
+
+    async fn next_bytes(&mut self) -> Option<Bytes> {
+        if self.finished {
+            return None;
+        }
+        match self.next_chunk().await {
+            Ok(Some(c)) => Some(sse_bytes(&c)),
+            Ok(None) => {
+                self.finish_ok();
+                let mut out = self
+                    .usage_chunk()
+                    .map_or_else(Vec::new, |c| sse_bytes(&c).to_vec());
+                out.extend_from_slice(DONE.as_bytes());
+                Some(Bytes::from(out))
             }
-            match self.rest.next().await {
-                Some(Ok(mut c)) => {
-                    if self.observe(&mut c) {
-                        return Some(sse_bytes(&c));
-                    }
-                }
-                None => {
-                    self.finish_ok();
-                    return Some(Bytes::from_static(DONE.as_bytes()));
-                }
-                Some(Err(e)) => return Some(self.finish_err(&e)),
+            Err(e) => {
+                self.finish_err(&e);
+                Some(self.error_tail())
             }
         }
     }
@@ -848,6 +1061,7 @@ fn new_relay(
         usage: None,
         ttft,
         forward_usage,
+        tools: ToolIndexer::default(),
         last: Default::default(),
         finished: false,
     }
@@ -875,7 +1089,11 @@ fn stream_response(
             .await
             .map(|b| (Ok::<_, std::convert::Infallible>(b), r))
     });
-    let mut resp = Response::new(Body::from_stream(body));
+    sse_response(Body::from_stream(body), provider)
+}
+
+fn sse_response(body: Body, provider: Option<HeaderValue>) -> Response {
+    let mut resp = Response::new(body);
     let h = resp.headers_mut();
     h.insert(
         header::CONTENT_TYPE,
@@ -897,33 +1115,21 @@ async fn aggregate_response(
     stream: StartedStream,
     ttft: Duration,
 ) -> Response {
-    let mut relay = new_relay(st.clone(), meta, cand.clone(), res, stream, ttft, true);
+    let mut relay = new_relay(st.clone(), meta, cand.clone(), res, stream, ttft, false);
     let mut content = String::new();
     let mut tool_calls: BTreeMap<u64, Value> = BTreeMap::new();
     let mut finish_reason: Option<String> = None;
     let mut chunks = Vec::new();
     loop {
-        if let Some(mut c) = relay.prelude.pop_front() {
-            relay.observe(&mut c);
-            chunks.push(c);
-            continue;
-        }
-        match relay.rest.next().await {
-            Some(Ok(mut c)) => {
-                relay.observe(&mut c);
-                chunks.push(c);
-            }
-            None => {
+        match relay.next_chunk().await {
+            Ok(Some(c)) => chunks.push(c),
+            Ok(None) => {
                 relay.finish_ok();
                 break;
             }
-            Some(Err(e)) => {
+            Err(e) => {
                 relay.finish_err(&e);
-                return error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "upstream_error",
-                    "o provider interrompeu a resposta no meio; reenvie a request",
-                );
+                return error_response(StatusCode::BAD_GATEWAY, "upstream_error", INTERRUPTED);
             }
         }
     }
@@ -985,6 +1191,90 @@ fn merge_tool_call(acc: &mut BTreeMap<u64, Value>, delta: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn indexes(deltas: &[Value]) -> Vec<Value> {
+        let mut ix = ToolIndexer::default();
+        deltas
+            .iter()
+            .map(|d| {
+                let mut d = d.clone();
+                ix.normalize(&mut d);
+                d["index"].clone()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tool_indexer_keeps_well_formed_interleaved_indexes() {
+        let d = [
+            json!({ "index": 0, "id": "c1" }),
+            json!({ "index": 1, "id": "c2" }),
+            json!({ "index": 0 }),
+            json!({ "index": 1 }),
+        ];
+        assert_eq!(indexes(&d), [json!(0), json!(1), json!(0), json!(1)]);
+    }
+
+    #[test]
+    fn tool_indexer_splits_parallel_calls_with_repeated_or_missing_index() {
+        let repeated = [
+            json!({ "index": 0, "id": "c1" }),
+            json!({ "index": 0 }),
+            json!({ "index": 0, "id": "c2" }),
+            json!({ "index": 0 }),
+        ];
+        assert_eq!(indexes(&repeated), [json!(0), json!(0), json!(1), json!(1)]);
+        let missing = [
+            json!({ "id": "c1" }),
+            json!({ "function": { "arguments": "{}" } }),
+            json!({ "id": "c2" }),
+        ];
+        assert_eq!(indexes(&missing), [json!(0), json!(0), json!(1)]);
+    }
+
+    /// Sem `id`, com `index` repetido ou ausente: duas chamadas não viram uma com
+    /// `{"p":1}{"q":2}`.
+    #[test]
+    fn tool_indexer_splits_parallel_calls_without_any_id() {
+        let call = |index: Value, name: &str, args: &str| json!({ "index": index, "id": "", "function": { "name": name, "arguments": args } });
+        for index in [json!(0), Value::Null] {
+            let got = indexes(&[
+                call(index.clone(), "Read", "{\"p\":1}"),
+                call(index.clone(), "Grep", "{\"q\":2}"),
+                call(index.clone(), "Grep", "{\"q\":3}"),
+            ]);
+            assert_eq!(got, [json!(0), json!(1), json!(2)], "index {index}");
+        }
+    }
+
+    /// Nome repetido em chunk de continuação é a mesma chamada, mesmo com o JSON
+    /// completo seguido de chunk sem argumentos.
+    #[test]
+    fn tool_indexer_keeps_repeated_name_as_continuation() {
+        let call = |name: &str, args: &str| json!({ "index": 0, "function": { "name": name, "arguments": args } });
+        let got = indexes(&[
+            call("Read", "{\"p\""),
+            call("Read", ":1}"),
+            call("Read", ""),
+            call("", ""),
+        ]);
+        assert_eq!(got, [json!(0), json!(0), json!(0), json!(0)]);
+    }
+
+    #[test]
+    fn tool_indexer_tolerates_repeated_id_and_late_id() {
+        let repeated_id = [
+            json!({ "index": 0, "id": "c1" }),
+            json!({ "index": 0, "id": "c1" }),
+        ];
+        assert_eq!(indexes(&repeated_id), [json!(0), json!(0)]);
+        let late_id = [
+            json!({ "index": 0, "function": { "name": "f" } }),
+            json!({ "index": 0, "id": "c1" }),
+            json!({ "index": 1, "id": "" }),
+        ];
+        assert_eq!(indexes(&late_id), [json!(0), json!(0), json!(1)]);
+    }
 
     #[test]
     fn tool_call_deltas_merge_by_index() {

@@ -318,7 +318,7 @@ Outras tools: `status(batch_id)`, `quota()` (saldo por provider), `report(period
 ### Fase 0 — Core do gateway (2–3 dias)
 - `axum` + `providers.toml` + hot-reload; `/v1/chat/completions` com classes; scheduler com buckets; fallback pré-1º-token; ledger; `/quota`, `/health`, `/v1/models`.
 - Testes com providers mockados (`wiremock`): 429 → próximo; timeout de 1º token → próximo; erro pós-1º-token → encerra limpo; TPM insuficiente → provider pulado sem request.
-- **Aceite:** Continue/Cline apontados para `kax/coder-fast` e `kax/coder-smart` funcionam com streaming; binário < 8 MB; memória privada < 10 MB ociosa após uso (§3.1).
+- **Aceite:** suíte `tests/client_compat.rs` (F0-24) verde no CI em Linux e Windows, reproduzindo os formatos de request do Continue e do Cline em `kax/coder-fast` e `kax/coder-smart` com streaming; binário < 8 MB; memória privada < 10 MB ociosa após uso (§3.1). Parte dos formatos veio de PRs, issues e docs dos clientes, e parte de memória do código (cabeçalho do teste); rodar os clientes reais é conferência opcional, com roteiro em `docs/smoke/fase-0-clientes.md` (ADR 0004).
 
 ### Fase 1 — Ponte Anthropic (2–3 dias)
 - `/v1/messages` + `count_tokens`; translator completo (3.5); passthrough `claude-*`.

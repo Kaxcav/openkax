@@ -1260,3 +1260,25 @@ impl Fx {
         self.s.reserve(&p.candidates[0]).unwrap()
     }
 }
+
+/// ADR 0006: a assinatura de raciocínio (alguns KB por passo de tool) não é prompt.
+/// Contá-la daria `PacketTooLarge` e reserva inflada em sessões longas, até em
+/// fallback para provider que nem a recebe.
+#[test]
+fn estimate_ignores_extra_content_of_tool_calls() {
+    let with = |call: serde_json::Value| -> ChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "m",
+            "messages": [{ "role": "assistant", "content": null, "tool_calls": [call] }],
+        }))
+        .unwrap()
+    };
+    let bare = serde_json::json!({ "id": "c1", "type": "function", "function": { "name": "f", "arguments": "{}" } });
+    let mut signed = bare.clone();
+    signed["extra_content"] =
+        serde_json::json!({ "google": { "thought_signature": "s".repeat(8000) } });
+    assert_eq!(
+        estimate_tokens(&with(signed), 1.0),
+        estimate_tokens(&with(bare), 1.0)
+    );
+}

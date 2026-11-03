@@ -23,6 +23,13 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub struct Config {
     #[serde(default)]
     pub defaults: Defaults,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_aliases",
+        serialize_with = "serialize_aliases"
+    )]
+    pub aliases: Vec<(String, String)>,
     #[serde(default, rename = "provider")]
     pub providers: Vec<Provider>,
     #[serde(default, rename = "class")]
@@ -339,6 +346,18 @@ pub struct Quirks {
     /// codificação. Cohere degenera com UTF-8 cru (F0-19).
     #[serde(default, skip_serializing_if = "is_false")]
     pub ascii_json: bool,
+    /// Provider sem visão: cada `image_url` vira um aviso em texto (ADR 0006).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub strip_images: bool,
+    /// Provider exige assinatura de raciocínio em `tool_calls` (Gemini 3+, via
+    /// `extra_content.google.thought_signature`). Ligado: mantém a assinatura e
+    /// põe o valor neutro da doc em chamada sem assinatura vinda de outro modelo.
+    /// Desligado: `extra_content` não vai ao upstream (ADR 0006).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub thought_signatures: bool,
+    /// Formato exigido em `tool_calls[].id` e `tool_call_id` do histórico.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<ToolCallIdQuirk>,
 }
 
 /// Nome do header com o saldo **restante** de cada bucket.
@@ -376,6 +395,14 @@ impl Quirks {
 pub enum ToolChoiceQuirk {
     /// Provider só aceita `tool_choice: "auto"`; outros valores são reescritos.
     AutoOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallIdQuirk {
+    /// Exatamente 9 letras ou dígitos (Mistral). `id` que já cumpre passa igual; o
+    /// resto vira um hash determinístico, igual em `tool_calls` e na mensagem `tool`.
+    Alnum9,
 }
 
 /// Segundos de cooldown por tipo de erro.
@@ -498,6 +525,26 @@ pub enum ConfigError {
     Invalid(Vec<String>),
 }
 
+/// Casa `s` contra `pattern` que contém apenas `*` como curinga (F1-7).
+pub fn glob_matches(pattern: &str, s: &str) -> bool {
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == s;
+    }
+    if !s.starts_with(parts[0]) {
+        return false;
+    }
+    let mut remainder = &s[parts[0].len()..];
+    for &part in &parts[1..parts.len() - 1] {
+        let Some(idx) = remainder.find(part) else {
+            return false;
+        };
+        remainder = &remainder[idx + part.len()..];
+    }
+    let last = parts[parts.len() - 1];
+    remainder.ends_with(last)
+}
+
 impl Config {
     /// Parse + validação.
     pub fn from_toml_str(s: &str) -> Result<Self, ConfigError> {
@@ -524,6 +571,16 @@ impl Config {
 
     pub fn class(&self, id: &str) -> Option<&Class> {
         self.classes.iter().find(|c| c.id == id)
+    }
+
+    /// Se `model` casar com algum alias, retorna a classe de destino (`kax/...`).
+    pub fn resolve_alias<'a>(&'a self, model: &str) -> Option<&'a str> {
+        for (pattern, target) in &self.aliases {
+            if glob_matches(pattern, model) {
+                return Some(target.as_str());
+            }
+        }
+        None
     }
 
     /// Checagens semânticas; acumula todos os erros em vez de parar no primeiro.
@@ -609,6 +666,15 @@ impl Config {
                     ));
                 }
                 max_tier = max_tier.max(p.tier);
+            }
+        }
+
+        for (pattern, target) in &self.aliases {
+            if !class_ids.contains(target.as_str()) {
+                errs.push(format!(
+                    "alias {:?}: classe de destino {:?} não existe",
+                    pattern, target
+                ));
             }
         }
 
@@ -701,6 +767,46 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+fn deserialize_aliases<'de, D>(deserializer: D) -> Result<Vec<(String, String)>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct AliasesVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for AliasesVisitor {
+        type Value = Vec<(String, String)>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a map of pattern to class name")
+        }
+
+        fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+        where
+            M: serde::de::MapAccess<'de>,
+        {
+            let mut entries = Vec::new();
+            while let Some((k, v)) = access.next_entry()? {
+                entries.push((k, v));
+            }
+            Ok(entries)
+        }
+    }
+
+    deserializer.deserialize_map(AliasesVisitor)
+}
+
+fn serialize_aliases<S>(aliases: &[(String, String)], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    use serde::ser::SerializeMap;
+    let mut map = serializer.serialize_map(Some(aliases.len()))?;
+    for (k, v) in aliases {
+        map.serialize_entry(k, v)?;
+    }
+    map.end()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -738,6 +844,12 @@ mod tests {
         assert_eq!(flash.limits.as_ref().unwrap().tpm, Some(250_000));
         assert_eq!(flash.max_ctx, Some(1_000_000));
         assert_eq!(gemini.quirks.tool_choice, Some(ToolChoiceQuirk::AutoOnly));
+        // ADR 0006: Gemini 3+ dá 400 sem a assinatura; Mistral, sem `id` de 9 alfanuméricos.
+        assert!(gemini.quirks.thought_signatures);
+        assert_eq!(
+            c.provider("mistral").unwrap().quirks.tool_call_id,
+            Some(ToolCallIdQuirk::Alnum9)
+        );
 
         // Mistral: headers reais do smoke mostraram limite por modelo.
         let mistral = c.provider("mistral").unwrap();
@@ -1206,5 +1318,45 @@ mod tests {
             "#,
         );
         assert!(errs.iter().any(|e| e.contains("último degrau")), "{errs:?}");
+    }
+
+    #[test]
+    fn glob_matches_cases() {
+        assert!(glob_matches("claude-haiku-*", "claude-haiku-4-5-20251001"));
+        assert!(glob_matches("claude-haiku-*", "claude-haiku-"));
+        assert!(!glob_matches("claude-haiku-*", "claude-sonnet-9"));
+        assert!(glob_matches("claude-exato", "claude-exato"));
+        assert!(!glob_matches("claude-exato", "claude-exato-2"));
+        assert!(glob_matches("*", "qualquer"));
+        assert!(glob_matches("*-fast", "kax-fast"));
+        assert!(!glob_matches("*-fast", "kax-fast-extra"));
+        assert!(glob_matches("a*b*c", "axxbxxc"));
+        assert!(!glob_matches("a*b*c", "axxbcxx"));
+    }
+
+    #[test]
+    fn alias_target_must_exist() {
+        let errs = invalid(
+            r#"
+            [aliases]
+            "claude-haiku-*" = "kax/nao-existe"
+
+            [[provider]]
+            id = "b"
+            base_url = "http://b"
+            auth = { kind = "none" }
+            models = [{ id = "m", upstream = "m" }]
+
+            [[class]]
+            id = "kax/x"
+            max_packet_tokens = 10
+            route = [{ provider = "b", model = "m" }]
+            "#,
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("classe de destino \"kax/nao-existe\" não existe")),
+            "{errs:?}"
+        );
     }
 }

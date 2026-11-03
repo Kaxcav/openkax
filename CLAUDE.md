@@ -12,9 +12,30 @@ Gateway/proxy local de IA em Rust (binário único Windows, < 8 MB, memória pri
 Modo B (MCP com pacote enxuto) é o principal. Modo A (rewrite de modelo via `ANTHROPIC_DEFAULT_HAIKU_MODEL`) é bônus.
 
 ## Fase atual
-**Fase 0 — Core do gateway.** Critério de saída: 4 testes de fallback com `wiremock` passando (429→próximo; timeout 1º token→próximo; erro pós-1º-token→encerra limpo; TPM insuficiente→provider pulado sem request), Continue/Cline funcionando via classes, binário < 8 MB, memória privada < 10 MB ociosa após uso.
-Não iniciar Fase 1 antes disso. Atualize esta seção ao mudar de fase.
-Progresso (2026-11-02): scheduler/dispatcher/ledger + providers de cauda (ADR 0003/0004); cooldown por tipo de erro (F0-17); timeout de 1º token por modelo (F0-18); Cohere sem raciocínio + `ascii_json` (F0-19); rotas F0-20; Groq/Cloudflare habilitados, 410 e headers IETF (F0-21); hot-reload + snapshot dos buckets (F0-10, ADR 0005); WindowsPlatform + CI ubuntu/windows com artefato `.exe` (F0-11); GitHub Models removido e Vercel desligada/fora das rotas (F0-22); critério de memória privada + pool/blocking enxutos (F0-23, ADR 0002). Testes: 94 unitários + 19 de integração (Windows e Linux). Release Windows local 2,94 MiB; memória privada ociosa após 5 requests 3,82 MiB (working set 14,7 MiB, informativo). PR `fase-0 → main` aberto, **sem merge** até o aceite com Continue/Cline (F0-12, usuário). Ver `tasks.json`.
+**Fase 1 — Ponte Anthropic** (branch `fase-1`; a Fase 0 já está na `main`). Critério de saída no `PLANO_MESTRE.md` §4 e tarefas F1-* em `docs/noturno/RUNBOOK.md`.
+Progresso (2026-11-02): Tarefas F1-1 a F1-7 concluídas; F1-8 (documentação, ADR 0006 aceito e roteiro de aceite manual) em revisão.
+- F1-1..F1-4: Tipos e tradução Anthropic ↔ OpenAI, endpoint `POST /v1/messages` para classes `kax/*` (stream/não-stream), fallback pré-1º-token, assinaturas Gemini (`thought_signatures`) e quirks (`alnum9`).
+- F1-5: `POST /v1/messages/count_tokens` para `kax/*` usando `chars_per_token` do 1º degrau, sem reservar cota nem checar limite de pacote.
+- F1-6: Passthrough byte a byte de `claude-*` para upstream nativo Anthropic (`/v1/messages` e `/v1/messages/count_tokens`) com client dedicado sem timeout total (`connect_timeout = 10s`, `read_timeout = 300s`), filtro de hop-by-hop e preservação de múltiplos headers.
+- F1-7: Seção opcional `[aliases]` no TOML (Modo A) preservando ordem de declaração (primeiro match com glob `*` vence), validado no load/reload.
+- Testes atuais: 185 unitários + 79 de integração (total 264 testes verdes, 0 ignored, clippy e fmt limpos). Ver `tasks.json`.
+
+## Como usar
+
+Gateway em `localhost:8000`:
+```powershell
+$env:ANTHROPIC_BASE_URL="http://localhost:8000"
+```
+
+Modo A opcional (subagente Explore / haiku roteado para classe local):
+```powershell
+$env:ANTHROPIC_DEFAULT_HAIKU_MODEL="kax/summarizer"
+```
+ou via `[aliases]` no `providers.toml`:
+```toml
+[aliases]
+"claude-haiku-*" = "kax/summarizer"
+```
 
 ## Ambientes (ver ADR 0001)
 Dois ambientes de dev; descubra em qual está (`uname`/plataforma) antes de propor comandos.

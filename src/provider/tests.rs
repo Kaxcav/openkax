@@ -230,6 +230,14 @@ fn upstream_body_auto_only_drops_tools_for_none() {
 }
 
 #[test]
+fn upstream_body_replaces_null_stream_options() {
+    let p = provider_from("");
+    let req = request(json!({ "stream_options": null }));
+    let b = build_upstream_body(&p, &req, "m", None);
+    assert_eq!(b["stream_options"]["include_usage"], true);
+}
+
+#[test]
 fn upstream_body_without_stream_usage_quirk() {
     let p = provider_from("quirks = { no_stream_usage = true }");
     let req = request(json!({ "stream_options": { "include_usage": true }, "max_tokens": 10 }));
@@ -518,4 +526,216 @@ fn ratelimit_headers_for_debug_only_expose_limit_names() {
             ("x-ratelimit-limit-requests".to_owned(), "20".to_owned())
         ]
     );
+}
+
+// ---------------------------------------------------- quirks da ponte (F1-2, ADR 0006)
+
+fn provider_with(quirks: &str) -> crate::config::Provider {
+    let toml = format!(
+        r#"
+        [[provider]]
+        id = "p"
+        base_url = "http://x"
+        auth = {{ kind = "none" }}
+        quirks = {{ {quirks} }}
+        models = [{{ id = "m", upstream = "m" }}]
+
+        [[class]]
+        id = "kax/x"
+        max_packet_tokens = 1000
+        route = [{{ provider = "p", model = "m" }}]
+        "#
+    );
+    Config::from_toml_str(&toml).unwrap().providers.remove(0)
+}
+
+fn upstream_messages(quirks: &str, messages: Value) -> Value {
+    let req = serde_json::from_value(json!({ "model": "kax/x", "messages": messages })).unwrap();
+    build_upstream_body(&provider_with(quirks), &req, "m", None)["messages"].clone()
+}
+
+fn call(id: &str, extra: Value) -> Value {
+    let mut c =
+        json!({ "id": id, "type": "function", "function": { "name": "f", "arguments": "{}" } });
+    if !extra.is_null() {
+        c["extra_content"] = extra;
+    }
+    c
+}
+
+fn signature(sig: &str) -> Value {
+    json!({ "google": { "thought_signature": sig } })
+}
+
+#[test]
+fn strip_images_swaps_each_image_for_a_notice() {
+    let image =
+        json!({ "type": "image_url", "image_url": { "url": "data:image/png;base64,QQ==" } });
+    let text = json!({ "type": "text", "text": "veja" });
+    let msgs = json!([
+        { "role": "user", "content": [text, image] },
+        { "role": "user", "content": [image] },
+    ]);
+    let notice = json!({ "type": "text", "text": "[image omitted: provider has no vision]" });
+    assert_eq!(
+        upstream_messages("strip_images = true", msgs.clone()),
+        json!([
+            { "role": "user", "content": [text, notice] },
+            { "role": "user", "content": [notice] },
+        ])
+    );
+    assert_eq!(
+        upstream_messages("", msgs.clone()),
+        msgs,
+        "sem o quirk, igual"
+    );
+}
+
+/// Provider sem o quirk não recebe `extra_content`: há quem recuse campo extra.
+#[test]
+fn extra_content_only_reaches_providers_with_thought_signatures() {
+    let msgs = json!([{ "role": "assistant", "content": null, "tool_calls": [call("c1", signature("S"))] }]);
+    assert_eq!(
+        upstream_messages("", msgs.clone()),
+        json!([{ "role": "assistant", "content": null, "tool_calls": [call("c1", Value::Null)] }])
+    );
+    assert_eq!(
+        upstream_messages("thought_signatures = true", msgs.clone()),
+        msgs
+    );
+}
+
+/// Histórico de outro modelo (fallback no meio da sessão) não tem assinatura: a
+/// 1ª chamada de cada mensagem recebe o valor neutro que a doc do Gemini aceita;
+/// as paralelas seguintes ficam sem.
+#[test]
+fn missing_signature_gets_the_documented_neutral_value() {
+    let got = upstream_messages(
+        "thought_signatures = true",
+        json!([{ "role": "assistant", "content": null, "tool_calls": [call("c1", Value::Null), call("c2", Value::Null)] }]),
+    );
+    assert_eq!(
+        got[0]["tool_calls"],
+        json!([
+            call("c1", signature("skip_thought_signature_validator")),
+            call("c2", Value::Null)
+        ])
+    );
+}
+
+#[test]
+fn alnum9_rewrites_tool_call_ids_consistently() {
+    let got = upstream_messages(
+        r#"tool_call_id = "alnum9""#,
+        json!([
+            { "role": "assistant", "content": null, "tool_calls": [call("toolu_01A", Value::Null), call("abc123XYZ", Value::Null), call("toolu_01B", Value::Null)] },
+            { "role": "tool", "tool_call_id": "toolu_01A", "content": "1" },
+            { "role": "tool", "tool_call_id": "abc123XYZ", "content": "2" },
+            { "role": "tool", "tool_call_id": "toolu_01B", "content": "3" },
+        ]),
+    );
+    let ids: Vec<&str> = (0..3)
+        .map(|i| got[0]["tool_calls"][i]["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids[1], "abc123XYZ", "id que já cumpre passa igual");
+    for id in &ids {
+        assert_eq!(id.len(), 9, "{id}");
+        assert!(id.chars().all(|c| c.is_ascii_alphanumeric()), "{id}");
+    }
+    assert_ne!(ids[0], ids[2]);
+    for i in 0..3 {
+        assert_eq!(got[i + 1]["tool_call_id"], ids[i], "mensagem tool {i}");
+    }
+}
+
+/// Só exatamente 9 passa: alfanumérico mais longo ou mais curto também é recusado.
+#[test]
+fn alnum9_rewrites_alphanumeric_ids_of_other_lengths() {
+    for id in ["abcdefghij", "abcdefgh"] {
+        let got = upstream_messages(
+            r#"tool_call_id = "alnum9""#,
+            json!([{ "role": "tool", "tool_call_id": id, "content": "1" }]),
+        );
+        let new = got[0]["tool_call_id"].as_str().unwrap();
+        assert_ne!(new, id);
+        assert_eq!(new.len(), 9, "{new}");
+        assert!(new.chars().all(|c| c.is_ascii_alphanumeric()), "{new}");
+    }
+}
+
+/// Cada request é traduzida sozinha: o mesmo `id` tem de virar o mesmo valor sempre.
+/// O valor fixo protege sessões em andamento de uma troca de algoritmo.
+#[test]
+fn alnum9_is_stable_across_requests() {
+    let msgs = json!([{ "role": "tool", "tool_call_id": "toolu_01A", "content": "1" }]);
+    let got = upstream_messages(r#"tool_call_id = "alnum9""#, msgs.clone());
+    assert_eq!(got[0]["tool_call_id"], "5hJXTcYN8");
+    assert_eq!(upstream_messages(r#"tool_call_id = "alnum9""#, msgs), got);
+}
+
+#[test]
+fn signature_present_is_kept_and_other_extra_content_survives() {
+    let first_signed = json!([{ "role": "assistant", "content": null, "tool_calls": [
+        call("c1", signature("S")), call("c2", Value::Null),
+    ]}]);
+    assert_eq!(
+        upstream_messages("thought_signatures = true", first_signed.clone()),
+        first_signed
+    );
+    let other = json!({ "other": 1, "google": { "x": 2 } });
+    let got = upstream_messages(
+        "thought_signatures = true",
+        json!([{ "role": "assistant", "tool_calls": [call("c1", other)] }]),
+    );
+    assert_eq!(
+        got[0]["tool_calls"][0]["extra_content"],
+        json!({ "other": 1, "google": { "x": 2, "thought_signature": "skip_thought_signature_validator" } })
+    );
+}
+
+/// Forma estranha vinda de `/v1/chat/completions` não derruba: passa como veio.
+#[test]
+fn message_quirks_tolerate_odd_shapes() {
+    let msgs = json!([
+        { "role": "assistant", "tool_calls": "nada" },
+        { "role": "assistant", "tool_calls": [1, { "id": 7 }] },
+        { "role": "tool", "tool_call_id": 7, "content": "x" },
+        { "role": "user", "content": ["texto solto", { "type": "image_url" }] },
+    ]);
+    let got = upstream_messages(
+        r#"strip_images = true, tool_call_id = "alnum9", thought_signatures = true"#,
+        msgs,
+    );
+    assert_eq!(got[0]["tool_calls"], "nada");
+    assert_eq!(got[2]["tool_call_id"], 7);
+    assert_eq!(got[3]["content"][0], "texto solto");
+    assert_eq!(
+        got[3]["content"][1],
+        json!({ "type": "text", "text": "[image omitted: provider has no vision]" })
+    );
+}
+
+/// Assinatura `null` é chamada sem assinatura. `extra_content` de forma estranha,
+/// vindo de `/v1/chat/completions`, não pode derrubar o processo (`panic = "abort"`).
+#[test]
+fn null_or_malformed_extra_content_gets_the_neutral_signature() {
+    let neutral = signature("skip_thought_signature_validator");
+    for extra in [
+        json!({ "google": { "thought_signature": null } }),
+        json!("x"),
+        json!({ "google": "x" }),
+    ] {
+        let got = upstream_messages(
+            "thought_signatures = true",
+            json!([{ "role": "assistant", "tool_calls": [call("c1", extra.clone())] }]),
+        );
+        assert_eq!(got[0]["tool_calls"][0]["extra_content"], neutral, "{extra}");
+    }
+}
+
+/// O default não altera nada que a Fase 0 já mandava.
+#[test]
+fn bridge_quirks_default_off() {
+    let q = provider_with("").quirks;
+    assert!(!q.strip_images && !q.thought_signatures && q.tool_call_id.is_none());
 }

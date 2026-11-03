@@ -54,6 +54,8 @@ pub struct RequestRecord {
     /// Request com `x-openkax-pin` (depuração/smoke).
     pub pinned: bool,
     pub outcome: Outcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -204,6 +206,7 @@ mod tests {
             reasoning: false,
             pinned: false,
             outcome: Outcome::RequestFault,
+            status: None,
         })
     }
 

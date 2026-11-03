@@ -122,9 +122,19 @@ pub struct Sse {
 }
 
 impl Sse {
+    /// Estrito no enquadramento: cada evento tem uma linha `data:` e termina em
+    /// linha em branco; um cliente SSE real juntaria duas linhas num evento só.
     pub fn parse(text: &str) -> Self {
         let mut out = Self::default();
+        if text.contains("data:") {
+            assert!(
+                text.ends_with("\n\n"),
+                "evento SSE sem terminador: {text:?}"
+            );
+        }
         for event in text.split("\n\n") {
+            let data_lines = event.lines().filter(|l| l.starts_with("data:")).count();
+            assert!(data_lines <= 1, "duas linhas data: num evento: {event:?}");
             for line in event.lines() {
                 let Some(data) = line.strip_prefix("data:") else {
                     continue;
@@ -232,3 +242,50 @@ pub fn two_provider_config(groq_url: &str, gemini_url: &str) -> String {
 }
 
 pub const SECRETS: &[(&str, &str)] = &[("GROQ_API_KEY", "k-groq"), ("GEMINI_API_KEY", "k-gemini")];
+
+/// Como [`Gateway::spawn`], com o ledger real gravando em `dir`.
+pub async fn spawn_with_ledger(
+    toml: &str,
+    secrets: &[(&str, &str)],
+    dir: std::path::PathBuf,
+) -> Gateway {
+    let config = Config::from_toml_str(toml).expect("config de teste inválida");
+    let mut deps = Deps::new(config, Secrets::from_pairs(secrets.iter().copied()));
+    deps.ledger = openkax::ledger::spawn(dir, 64);
+    let state = AppState::new(deps).expect("AppState");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(server::serve(
+        listener,
+        state.clone(),
+        std::future::pending(),
+    ));
+    server::install_crypto_provider();
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    Gateway { base, http, state }
+}
+
+/// Lê as linhas do ledger em `dir`, esperando até `n` aparecerem (a escrita é
+/// assíncrona).
+pub async fn ledger_lines(dir: &std::path::Path, n: usize) -> Vec<Value> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut lines = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let text = std::fs::read_to_string(e.path()).unwrap_or_default();
+                lines.extend(
+                    text.lines()
+                        .filter_map(|l| serde_json::from_str::<Value>(l).ok()),
+                );
+            }
+        }
+        if lines.len() >= n || std::time::Instant::now() > deadline {
+            return lines;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}

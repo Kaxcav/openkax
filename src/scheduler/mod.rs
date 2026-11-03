@@ -113,6 +113,8 @@ pub struct Candidate {
     pub input_chars: usize,
     /// Tokens de entrada estimados (com `safety_factor`).
     pub est_tokens: u32,
+    /// Chars/token do modelo no momento da escolha.
+    pub chars_per_token: f64,
     /// O que será debitado no TPM/TPD: entrada (+ saída com `tpm_counts_max_tokens`).
     pub reserve_tokens: u32,
     /// `max_tokens` a enviar ao upstream quando há `max_tokens_cap`.
@@ -961,6 +963,22 @@ impl Scheduler {
         }
     }
 
+    /// Chars/token do 1º candidato configurado de `class_id` (F1-5).
+    /// Retorna `None` se a classe não existe.
+    pub fn class_chars_per_token(&self, class_id: &str) -> Option<f64> {
+        let sh = &*self.shared;
+        let class = sh.classes.iter().find(|c| c.id == class_id)?;
+        for step in &class.steps {
+            if let Some((pi, mi)) = *step {
+                let p = &sh.providers[pi];
+                let m = &p.models[mi];
+                let ms = lock(&m.scope);
+                return Some(ms.chars_per_token);
+            }
+        }
+        Some(sh.default_cpt)
+    }
+
     /// Filtra e ordena os degraus elegíveis de `class_id`. Não debita nada.
     pub fn pick(&self, class_id: &str, request: &ChatCompletionRequest) -> Result<Pick, PickError> {
         self.pick_with(class_id, request, &PickOptions::default())
@@ -1081,8 +1099,8 @@ impl Scheduler {
         let mut ms = lock(&m.scope);
         ps.tick(now, utc);
         ms.scope.tick(now, utc);
-        let tokens = (f64::from(tokens_from(est.chars, est.messages, ms.chars_per_token))
-            * p.safety)
+        let chars_per_token = ms.chars_per_token;
+        let tokens = (f64::from(tokens_from(est.chars, est.messages, chars_per_token)) * p.safety)
             .ceil() as u32;
         let (out_reserve, max_tokens_override) = p.output_plan(est.requested_out);
         let reserve_tokens = tokens.saturating_add(out_reserve);
@@ -1108,6 +1126,7 @@ impl Scheduler {
             upstream_model: upstream,
             input_chars: est.chars,
             est_tokens: tokens,
+            chars_per_token,
             reserve_tokens,
             max_tokens_override,
         })
@@ -1556,16 +1575,32 @@ fn request_text(request: &ChatCompletionRequest) -> (usize, usize) {
                         .map_or(NON_TEXT_PART_CHARS, |t| t.chars().count());
                 }
             }
-            None => {}
+            Some(MessageContent::Null) | None => {}
         }
         if let Some(tc) = m.extra.get("tool_calls") {
-            chars += json_len(tc);
+            chars += json_len(tc).saturating_sub(extra_content_len(tc));
         }
     }
     if let Some(tools) = request.extra.get("tools") {
         chars += json_len(tools);
     }
     (chars, request.messages.len())
+}
+
+/// Chars de `extra_content` no JSON de `tool_calls`. A assinatura de raciocínio
+/// (Gemini, ADR 0006) tem alguns KB por passo de tool e não é prompt: contá-la daria
+/// `PacketTooLarge` e reserva inflada numa sessão longa.
+fn extra_content_len(tool_calls: &serde_json::Value) -> usize {
+    const KEY_AND_SEPARATORS: usize = r#""extra_content":,"#.len();
+    tool_calls.as_array().map_or(0, |calls| {
+        calls
+            .iter()
+            .filter_map(|call| call.get("extra_content"))
+            .map(|extra| {
+                KEY_AND_SEPARATORS + serde_json::to_string(extra).map_or(0, |s| s.chars().count())
+            })
+            .sum()
+    })
 }
 
 fn tokens_from(chars: usize, messages: usize, chars_per_token: f64) -> u32 {
