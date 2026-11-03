@@ -357,7 +357,6 @@ fn ts_index_method_on_untyped_receiver_is_ambiguous() {
 // ---------------------------------------------------------------- Python --
 
 #[test]
-#[ignore = "P6b"]
 fn py_outline_of_shapes() {
     let (src, facts) = extract(&PythonAdapter, "py", "pkg/shapes.py");
     assert_eq!(facts.module, ["pkg", "shapes"]);
@@ -413,7 +412,6 @@ fn py_outline_of_shapes() {
 }
 
 #[test]
-#[ignore = "P6b"]
 fn py_imports_and_refs() {
     let (_, main) = extract(&PythonAdapter, "py", "pkg/main.py");
     assert_eq!(main.module, ["pkg", "main"]);
@@ -603,5 +601,85 @@ export function outer(): number {
         &facts,
         f,
         ("inner", None, false, 19, RefKind::Call, Some("outer"))
+    ));
+}
+
+#[test]
+fn py_added_language_cases() {
+    let src = "from .utils import helper as h\nfrom ..shared import config\n\n@register\n@validate\nclass Model:\n    @property\n    def value(self) -> int:\n        \"\"\"Valor calculado.\"\"\"\n        return 42\n\ndef outer(x: int) -> int:\n    def inner(y: int) -> int:\n        return h(y * 2)\n    return inner(x)\n";
+
+    let facts = PythonAdapter.extract(Path::new("pkg/models.py"), src);
+    assert_eq!(facts.parse_errors, 0);
+    assert_eq!(facts.module, ["pkg", "models"]);
+
+    // Imports
+    assert_eq!(facts.imports.len(), 2);
+    assert_eq!(facts.imports[0].source, ".utils");
+    assert_eq!(facts.imports[0].name.as_deref(), Some("helper"));
+    assert_eq!(facts.imports[0].alias.as_deref(), Some("h"));
+    assert_eq!(facts.imports[1].source, "..shared");
+    assert_eq!(facts.imports[1].name.as_deref(), Some("config"));
+    assert_eq!(facts.imports[1].alias, None);
+
+    // Symbols
+    let sym_names: Vec<(&str, SymbolKind, Option<&str>)> = facts
+        .symbols
+        .iter()
+        .map(|s| {
+            (
+                s.qual_name.as_str(),
+                s.kind,
+                s.parent.as_ref().map(|p| p.as_str()),
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        sym_names,
+        [
+            ("Model", SymbolKind::Class, None),
+            (
+                "Model.value",
+                SymbolKind::Method,
+                Some("pkg/models.py::Model")
+            ),
+            ("outer", SymbolKind::Fn, None),
+            ("outer.inner", SymbolKind::Fn, Some("pkg/models.py::outer")),
+        ]
+    );
+
+    // Decorator on class and method: decorators included in span, signature starts at class / def
+    let model_sym = facts
+        .symbols
+        .iter()
+        .find(|s| s.qual_name == "Model")
+        .unwrap();
+    assert_eq!(model_sym.span.lines(), [4, 10]);
+    let model_sig = &src
+        [model_sym.signature_span.start_byte as usize..model_sym.signature_span.end_byte as usize];
+    assert_eq!(model_sig, "class Model");
+
+    let val_sym = facts
+        .symbols
+        .iter()
+        .find(|s| s.qual_name == "Model.value")
+        .unwrap();
+    assert_eq!(val_sym.span.lines(), [7, 10]);
+    assert_eq!(val_sym.doc_span.map(|d| d.lines()), Some([9, 9]));
+    let val_sig =
+        &src[val_sym.signature_span.start_byte as usize..val_sym.signature_span.end_byte as usize];
+    assert_eq!(val_sig, "def value(self) -> int");
+
+    // Nested call refs
+    let f = "pkg/models.py";
+    assert!(has_ref(
+        &facts,
+        f,
+        ("h", None, false, 14, RefKind::Call, Some("outer.inner"))
+    ));
+    assert!(has_ref(
+        &facts,
+        f,
+        ("inner", None, false, 15, RefKind::Call, Some("outer"))
     ));
 }
