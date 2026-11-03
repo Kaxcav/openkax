@@ -356,13 +356,36 @@ impl Index {
 
     /// Sítios (`call`, `type`, `use`) cuja resolução menciona uma definição
     /// que casa com `query`, em ordem de arquivo e linha.
-    pub fn refs(&self, _query: &str) -> Result<Vec<RefSite>, ContextError> {
-        Err(ContextError::NotImplemented("P6c: Index::refs"))
+    pub fn refs(&self, query: &str) -> Result<Vec<RefSite>, ContextError> {
+        self.sites(query, false)
     }
 
     /// Como `refs`, só os sítios `call`; `enclosing` é o chamador.
-    pub fn callers(&self, _query: &str) -> Result<Vec<RefSite>, ContextError> {
-        Err(ContextError::NotImplemented("P6c: Index::callers"))
+    pub fn callers(&self, query: &str) -> Result<Vec<RefSite>, ContextError> {
+        self.sites(query, true)
+    }
+
+    fn sites(&self, query: &str, only_calls: bool) -> Result<Vec<RefSite>, ContextError> {
+        let defs = self.table.lookup(query)?;
+        if defs.is_empty() {
+            return Err(ContextError::UnknownSymbol(query.to_string()));
+        }
+        let mut texts = Sources::new(self);
+        let mut out = Vec::new();
+        for (r, resolution) in self.table.sites(&defs, only_calls) {
+            let enclosing = match r.enclosing.as_ref().and_then(|id| self.table.symbol(id)) {
+                Some(s) => Some(summary(s, texts.get(&s.file)?)),
+                None => None,
+            };
+            out.push(RefSite {
+                file: r.file.clone(),
+                lines: r.span.lines(),
+                kind: r.kind,
+                enclosing,
+                resolution,
+            });
+        }
+        Ok(out)
     }
 
     /// Pacote de contexto dos `targets` (queries; cada uma precisa casar com

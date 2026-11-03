@@ -515,7 +515,6 @@ fn same_name_in_two_modules_is_flagged_ambiguous() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn callers_find_cross_module_sites() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -545,7 +544,6 @@ fn callers_find_cross_module_sites() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn refs_include_use_and_type_sites() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -578,7 +576,6 @@ fn refs_include_use_and_type_sites() {
 // -------------------------------------------------------------- resolução --
 
 #[test]
-#[ignore = "P6c"]
 fn resolution_tiers_and_hints() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -626,7 +623,6 @@ fn resolution_tiers_and_hints() {
 /// O import explícito vence a proximidade de diretório; sem import nem
 /// vizinhança, o caminho qualificado acha o alvo no degrau global.
 #[test]
-#[ignore = "P6c"]
 fn explicit_import_beats_a_sibling_with_the_same_name() {
     let d = tempfile::tempdir().unwrap();
     let root = d.path();
@@ -675,7 +671,6 @@ fn explicit_import_beats_a_sibling_with_the_same_name() {
 }
 
 #[test]
-#[ignore = "P6c"]
 fn method_with_unknown_receiver_is_ambiguous() {
     let d = workdir();
     let idx = indexed(d.path());
@@ -955,7 +950,6 @@ fn pack_lists_an_ambiguous_dependency_instead_of_guessing() {
 // ----------------------------------------------------------- incremental --
 
 #[test]
-#[ignore = "P6c"]
 fn refresh_reparses_only_the_changed_file() {
     let d = workdir();
     let root = d.path();
