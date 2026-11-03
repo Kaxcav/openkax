@@ -124,6 +124,19 @@ async fn attempt_loop(
             return TaskStatus::NeedsLead;
         }
     };
+    // Fail closed antes de gastar uma chamada ao operário.
+    if let Err(e) = verify::check_sandbox(&opts) {
+        st.log = e.to_string();
+        return TaskStatus::NeedsLead;
+    }
+    // Prefetch (rede, fora da caixa) sobre o base_ref, antes de qualquer diff do operário.
+    if !opts.prefetch.is_empty() {
+        let (path, o) = (wt.path.clone(), opts.clone());
+        if let Err(e) = blocking(move || verify::run_prefetch(&path, &o)).await {
+            st.log = e;
+            return TaskStatus::NeedsLead;
+        }
+    }
     let scope = {
         let path = wt.path.clone();
         match blocking(move || worktree::head(&path)).await {
@@ -306,9 +319,15 @@ async fn one_attempt(
         .map_err(Failure::Stop)?;
     st.verify_ms += t0.elapsed().as_millis() as u64;
     st.log = report
-        .outcomes
+        .warnings
         .iter()
-        .map(|o| format!("$ {}\n{}", o.command, o.log))
+        .cloned()
+        .chain(
+            report
+                .outcomes
+                .iter()
+                .map(|o| format!("$ {}\n{}", o.command, o.log)),
+        )
         .collect::<Vec<_>>()
         .join("\n");
     if report.passed {

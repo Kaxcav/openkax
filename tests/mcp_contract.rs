@@ -287,6 +287,7 @@ async fn delegate_returns_accepted_result() {
     }
 
     let repo = tempfile::tempdir().unwrap();
+    common::allow_unsandboxed(repo.path(), "");
     let git = |args: &[&str]| {
         let st = Command::new("git")
             .arg("-C")
@@ -385,6 +386,7 @@ async fn batch_memory_probe() {
             .await;
     }
     let repo = tempfile::tempdir().unwrap();
+    common::allow_unsandboxed(repo.path(), "");
     let git = |args: &[&str]| {
         let st = Command::new("git")
             .arg("-C")

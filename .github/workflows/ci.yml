@@ -35,6 +35,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # Sandbox do verify (ADR 0008): os testes de bwrap rodam de verdade no
+      # Linux e falham (não pulam) se o bwrap faltar com CI=true. O Ubuntu
+      # 24.04 bloqueia userns sem privilégio via AppArmor; liberado só no runner.
+      - name: bubblewrap
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --unshare-all --ro-bind / / --dev /dev true && echo "bwrap ok"
+
       - name: fmt
         run: cargo fmt --check
 

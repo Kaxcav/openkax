@@ -1,22 +1,35 @@
 # Copie para <repo>/.kax/verify.toml. Os comandos rodam SEMPRE dentro do
 # worktree da tarefa (nunca no repo do lead) e o primeiro que falhar encerra.
 #
-# Hoje (Fase 2) só `timeout_s` e `max_log_bytes` são usados pelo runner: os
-# comandos executados vêm de `accept.verify` no pacote da tarefa. Os blocos
-# [[language]] são validados no parse, mas a seleção por glob ainda não está
-# ligada ao runner — servem de referência para o lead montar `accept.verify`.
+# Hoje o runner usa `timeout_s`, `max_log_bytes`, `env_passthrough`, `sandbox`
+# e os `prefetch` dos blocos [[language]]. Os comandos de verify executados vêm
+# de `accept.verify` no pacote da tarefa; a seleção de [[language]] por glob
+# ainda não está ligada ao runner (os `commands` servem de referência para o
+# lead montar `accept.verify`).
 
-timeout_s = 300        # por comando
+timeout_s = 300        # por comando (vale também para o prefetch)
 max_log_bytes = 4096   # teto do verify_log devolvido (o fim do log é preservado)
 # env_passthrough = []  # variáveis extras herdadas pelo verify (nunca segredo; ver ADR 0007)
+
+# Isolamento do verify (ADR 0008). Padrão "bwrap": sem rede, $HOME vazio, só o
+# worktree gravável. Onde não há bwrap (Windows, macOS, Linux sem bubblewrap)
+# o verify RECUSA e a tarefa vai para needs_lead; rode o kax-workers no WSL
+# (docs/sandbox-wsl.md). "none" desliga o isolamento: só vale escrito aqui e
+# cada execução deixa um aviso no log da tarefa.
+# sandbox = "bwrap"
 
 [[language]]
 name = "rust"
 globs = ["**/*.rs", "Cargo.toml"]
 commands = ["cargo check --all-targets", "cargo clippy --all-targets -- -D warnings", "cargo test"]
 timeout_s = 900
+# Com rede, fora da caixa, sobre o base_ref, ANTES de aplicar o diff do
+# operário. Os prefetch de todos os blocos rodam (sem repetição). Dependência
+# nova trazida pelo diff não é baixada: o verify offline falha, de propósito.
+prefetch = ["cargo fetch --locked"]
 
 [[language]]
 name = "node"
 globs = ["**/*.ts", "**/*.js", "package.json"]
 commands = ["npm run lint", "npm test"]
+# prefetch = ["npm ci --ignore-scripts"]

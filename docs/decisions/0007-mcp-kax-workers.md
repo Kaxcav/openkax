@@ -141,6 +141,9 @@ ambiente. Até existir sandbox, o código do verify ainda pode:
   manda a tarefa para `needs_lead`, mas não reescreve o histórico que o verify
   criou na branch `kax/<id>`.
 
+**Atualização (2026-11-03): no Linux isto passou a ser coberto pelo ADR 0008**
+(bwrap, fail closed, prefetch fora da caixa); o Windows nativo segue sem sandbox.
+
 **Decisão adiada para a Fase 5: sandbox do verify.** Linux: `bwrap` ou
 `unshare -n` (sem rede, só o worktree e o toolchain montados, home vazio).
 Windows: Job Object (mata a árvore ao fechar, limites de CPU/memória) + token

@@ -42,6 +42,9 @@ ou via `[aliases]` no `providers.toml`:
 - Tools: `delegate`, `delegate_batch` (background, `parallelism` 4, máx. 16), `status(batch_id)`, `quota`, `report(day|week|month)`.
 - Cada tarefa roda num worktree `.kax/wt/<id>`; aceita → branch `kax/<id>` para integrar. Recusa/esgotou → `needs_lead` (você faz).
 - Verify: comandos de `accept.verify`; `.kax/verify.toml` ajusta `timeout_s`, `max_log_bytes` e `env_passthrough` (nunca segredo; ver ADR 0007).
+- Sandbox (ADR 0008): `sandbox = "bwrap"` é o padrão. O verify roda sem rede, com `$HOME` vazio e só o worktree gravável. Sem bwrap (Windows, macOS, Linux sem bubblewrap) ele **recusa** e a tarefa vai para `needs_lead`. `sandbox = "none"` só vale escrito e deixa aviso no log. Para delegar do Windows, rode o `openkax mcp` no WSL (`docs/sandbox-wsl.md`) e passe `repo` como caminho Linux. `git` não funciona dentro da caixa.
+- Prefetch: `prefetch = ["cargo fetch --locked"]` no `[[language]]` roda com rede, fora da caixa, sobre o `base_ref` e antes do diff do operário. Se falhar, vai para `needs_lead`. Dependência nova trazida pelo diff faz o verify offline falhar, de propósito.
+- `openkax doctor` mostra a linha `sandbox` (OK/WARN/FAIL).
 - Ledger `kind:"task"` em `%LOCALAPPDATA%\OpenKax\ledger`; limpeza: `openkax clean [--repo <path>] [--all]`.
 - Aceite manual: `docs/smoke/fase-2-aceite.md`; decisão: ADR 0007.
 
