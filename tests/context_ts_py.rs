@@ -1,8 +1,7 @@
 //! Aceite do `kax-context` para TypeScript/JavaScript e Python (ADR 0009).
 //!
-//! CONTRACT (P6a): os testes `#[ignore = "P6b"]` descrevem o que os adapters
-//! da P6b entregam; com os stubs eles falham (`cargo test -- --ignored`). Os
-//! de índice (`*_index_*`) também usam o `Index` da P6c.
+//! Os testes `*_index_*` também usam o `Index` da P6c; todos rodam desde que a
+//! P6b e a P6c entraram (PRs #12 e #13).
 //! Fixtures em `tests/fixtures/context/{ts,py}`; linhas citadas são as delas.
 
 use std::fs;
@@ -307,7 +306,6 @@ fn js_outline_of_legacy() {
 }
 
 #[test]
-#[ignore = "P6b"]
 fn ts_index_symbol_and_callers_cross_into_js() {
     let (_d, idx) = indexed("ts");
     let defs = idx.symbol("Rect.square").unwrap();
@@ -333,7 +331,6 @@ fn ts_index_symbol_and_callers_cross_into_js() {
 }
 
 #[test]
-#[ignore = "P6b"]
 fn ts_index_method_on_untyped_receiver_is_ambiguous() {
     let (_d, idx) = indexed("ts");
     let site = idx
@@ -452,7 +449,6 @@ fn py_imports_and_refs() {
 }
 
 #[test]
-#[ignore = "P6b"]
 fn py_index_symbol_and_callers() {
     let (_d, idx) = indexed("py");
     let defs = idx.symbol("Rect.square").unwrap();
